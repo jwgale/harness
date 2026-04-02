@@ -38,17 +38,12 @@ pub fn run_builder(backend: &Backend, model: &str, prompt: &str, timeout_secs: u
 
 fn run_claude_oneshot(model: &str, prompt: &str, timeout_secs: u64) -> Result<String, String> {
     let mut child = Command::new("claude")
-        .args(["--print", "--permission-mode", "bypassPermissions", "--model", model, "-p"])
-        .stdin(Stdio::piped())
+        .args(["--print", "--permission-mode", "bypassPermissions", "--model", model, "-p", prompt])
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to spawn claude: {e}"))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(prompt.as_bytes())
-            .map_err(|e| format!("Failed to write to claude stdin: {e}"))?;
-    }
 
     let output = wait_with_timeout(&mut child, timeout_secs)?;
 
@@ -62,21 +57,15 @@ fn run_claude_oneshot(model: &str, prompt: &str, timeout_secs: u64) -> Result<St
 }
 
 fn run_claude_builder(model: &str, prompt: &str, timeout_secs: u64) -> Result<String, String> {
-    // Builder also uses --print mode but with full agent capabilities
-    // Claude Code in --print mode with --permission-mode bypassPermissions can still
-    // read/write files and execute commands
+    // Builder uses --print mode with full agent capabilities
+    // Pass prompt as -p argument, null stdin to prevent blocking
     let mut child = Command::new("claude")
-        .args(["--print", "--permission-mode", "bypassPermissions", "--model", model, "-p"])
-        .stdin(Stdio::piped())
+        .args(["--print", "--permission-mode", "bypassPermissions", "--model", model, "-p", prompt])
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to spawn claude builder: {e}"))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(prompt.as_bytes())
-            .map_err(|e| format!("Failed to write to claude builder stdin: {e}"))?;
-    }
 
     let output = wait_with_timeout(&mut child, timeout_secs)?;
 
