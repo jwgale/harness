@@ -38,7 +38,7 @@ pub fn run_builder(backend: &Backend, model: &str, prompt: &str, timeout_secs: u
 
 fn run_claude_oneshot(model: &str, prompt: &str, timeout_secs: u64) -> Result<String, String> {
     let mut child = Command::new("claude")
-        .args(["--print", "--dangerously-skip-permissions", "--model", model, "-p"])
+        .args(["--print", "--permission-mode", "bypassPermissions", "--model", model, "-p"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -63,10 +63,10 @@ fn run_claude_oneshot(model: &str, prompt: &str, timeout_secs: u64) -> Result<St
 
 fn run_claude_builder(model: &str, prompt: &str, timeout_secs: u64) -> Result<String, String> {
     // Builder also uses --print mode but with full agent capabilities
-    // Claude Code in --print mode with --dangerously-skip-permissions can still
+    // Claude Code in --print mode with --permission-mode bypassPermissions can still
     // read/write files and execute commands
     let mut child = Command::new("claude")
-        .args(["--print", "--dangerously-skip-permissions", "--model", model, "-p"])
+        .args(["--print", "--permission-mode", "bypassPermissions", "--model", model, "-p"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -233,7 +233,7 @@ pub fn run_oneshot_streaming(backend: &Backend, model: &str, prompt: &str, timeo
     let cmd = match backend {
         Backend::Claude => {
             let mut c = Command::new("claude");
-            c.args(["--print", "--dangerously-skip-permissions", "--model", model, "-p"]);
+            c.args(["--print", "--permission-mode", "bypassPermissions", "--model", model, "-p"]);
             c
         }
         Backend::Codex => {
@@ -250,7 +250,7 @@ pub fn run_builder_streaming(backend: &Backend, model: &str, prompt: &str, timeo
     let cmd = match backend {
         Backend::Claude => {
             let mut c = Command::new("claude");
-            c.args(["--print", "--dangerously-skip-permissions", "--model", model, "-p"]);
+            c.args(["--print", "--permission-mode", "bypassPermissions", "--model", model, "-p"]);
             c
         }
         Backend::Codex => {
