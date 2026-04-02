@@ -3,7 +3,7 @@ use crate::cli_backend::{self, Backend};
 use crate::config::Config;
 use crate::prompts;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Verdict {
     Pass,
     Revise,

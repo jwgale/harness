@@ -9,6 +9,20 @@ pub fn run(
     max_rounds: Option<u32>,
     pause_after_plan: bool,
     pause_after_eval: bool,
+    no_tui: bool,
+) -> Result<(), String> {
+    // If TUI is enabled (default), delegate to the TUI module
+    if !no_tui && !pause_after_plan && !pause_after_eval {
+        return crate::tui::run_with_tui(backend_override, max_rounds);
+    }
+    run_plain(backend_override, max_rounds, pause_after_plan, pause_after_eval)
+}
+
+fn run_plain(
+    backend_override: Option<&str>,
+    max_rounds: Option<u32>,
+    pause_after_plan: bool,
+    pause_after_eval: bool,
 ) -> Result<(), String> {
     artifacts::ensure_harness_exists()?;
     let config = Config::load(&artifacts::harness_dir())?;

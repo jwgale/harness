@@ -3,6 +3,7 @@ mod cli_backend;
 mod commands;
 mod config;
 mod prompts;
+mod tui;
 
 use clap::{Parser, Subcommand};
 
@@ -52,6 +53,9 @@ enum Commands {
         /// Pause for human review after each evaluation
         #[arg(long)]
         pause_after_eval: bool,
+        /// Disable TUI and use plain text output
+        #[arg(long)]
+        no_tui: bool,
     },
     /// Print current harness state from artifacts
     Status,
@@ -74,7 +78,8 @@ fn main() {
             max_rounds,
             pause_after_plan,
             pause_after_eval,
-        } => commands::run::run(backend.as_deref(), max_rounds, pause_after_plan, pause_after_eval),
+            no_tui,
+        } => commands::run::run(backend.as_deref(), max_rounds, pause_after_plan, pause_after_eval, no_tui),
         Commands::Status => commands::status::run(),
         Commands::Reset => commands::reset::run(),
         Commands::Feedback => commands::feedback::run(),

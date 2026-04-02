@@ -1,5 +1,6 @@
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::time::Duration;
 
 pub enum Backend {
@@ -136,6 +137,129 @@ fn run_codex_builder(prompt: &str, timeout_secs: u64) -> Result<String, String> 
 
     String::from_utf8(output.stdout)
         .map_err(|e| format!("Invalid UTF-8 in codex builder output: {e}"))
+}
+
+/// A handle to a streaming process. Lines arrive on the receiver.
+/// Call `wait()` to get the final collected output.
+pub struct StreamingProcess {
+    pub lines: mpsc::Receiver<String>,
+    child: std::process::Child,
+    reader_thread: Option<std::thread::JoinHandle<Vec<String>>>,
+    timeout_secs: u64,
+}
+
+impl StreamingProcess {
+    /// Wait for process to finish, return the full collected output.
+    pub fn wait(mut self) -> Result<String, String> {
+        let all_lines = self.reader_thread.take()
+            .expect("reader thread missing")
+            .join()
+            .map_err(|_| "Reader thread panicked".to_string())?;
+
+        let timeout = Duration::from_secs(self.timeout_secs);
+        let start = std::time::Instant::now();
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        // Collect stderr
+                        let mut stderr_buf = Vec::new();
+                        if let Some(mut err) = self.child.stderr.take() {
+                            let _ = std::io::Read::read_to_end(&mut err, &mut stderr_buf);
+                        }
+                        let stderr = String::from_utf8_lossy(&stderr_buf);
+                        return Err(format!("Process exited with error: {stderr}"));
+                    }
+                    return Ok(all_lines.join("\n"));
+                }
+                Ok(None) => {
+                    if start.elapsed() > timeout {
+                        let _ = self.child.kill();
+                        return Err(format!("Process timed out after {}s", self.timeout_secs));
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(e) => return Err(format!("Failed to wait for process: {e}")),
+            }
+        }
+    }
+
+}
+
+/// Spawn a command and stream its stdout line-by-line.
+fn spawn_streaming(mut cmd: Command, prompt: &str, timeout_secs: u64) -> Result<StreamingProcess, String> {
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn process: {e}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(prompt.as_bytes())
+            .map_err(|e| format!("Failed to write to stdin: {e}"))?;
+    }
+
+    let stdout = child.stdout.take()
+        .ok_or_else(|| "Failed to capture stdout".to_string())?;
+
+    let (tx, rx) = mpsc::channel();
+    let reader_thread = std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        let mut all_lines = Vec::new();
+        for line in reader.lines() {
+            match line {
+                Ok(l) => {
+                    all_lines.push(l.clone());
+                    // If receiver is dropped, keep reading to drain the pipe
+                    let _ = tx.send(l);
+                }
+                Err(_) => break,
+            }
+        }
+        all_lines
+    });
+
+    Ok(StreamingProcess {
+        lines: rx,
+        child,
+        reader_thread: Some(reader_thread),
+        timeout_secs,
+    })
+}
+
+/// Streaming variant of run_oneshot.
+pub fn run_oneshot_streaming(backend: &Backend, model: &str, prompt: &str, timeout_secs: u64) -> Result<StreamingProcess, String> {
+    let cmd = match backend {
+        Backend::Claude => {
+            let mut c = Command::new("claude");
+            c.args(["--print", "--dangerously-skip-permissions", "--model", model, "-p"]);
+            c
+        }
+        Backend::Codex => {
+            let mut c = Command::new("codex");
+            c.args(["exec", "-q"]);
+            c
+        }
+    };
+    spawn_streaming(cmd, prompt, timeout_secs)
+}
+
+/// Streaming variant of run_builder.
+pub fn run_builder_streaming(backend: &Backend, model: &str, prompt: &str, timeout_secs: u64) -> Result<StreamingProcess, String> {
+    let cmd = match backend {
+        Backend::Claude => {
+            let mut c = Command::new("claude");
+            c.args(["--print", "--dangerously-skip-permissions", "--model", model, "-p"]);
+            c
+        }
+        Backend::Codex => {
+            let mut c = Command::new("codex");
+            c.args(["exec", "-q", "--full-auto"]);
+            c
+        }
+    };
+    spawn_streaming(cmd, prompt, timeout_secs)
 }
 
 fn wait_with_timeout(child: &mut std::process::Child, timeout_secs: u64) -> Result<std::process::Output, String> {
