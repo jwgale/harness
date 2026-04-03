@@ -18,3 +18,4 @@ crossterm = "0.28"
 syntect = "5"
 dirs = "6"
 toml = "0.8"
+notify = { version = "7", default-features = false, features = ["macos_kqueue"] }

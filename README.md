@@ -68,6 +68,9 @@ harness evaluate --backend claude
 | `harness feedback` | Show latest evaluator feedback |
 | `harness daemon <action>` | Manage persistent daemon (start/stop/status/logs) |
 | `harness plugin list` | List installed plugins |
+| `harness workspace register <path>` | Register a project for daemon monitoring |
+| `harness workspace list` | List registered workspaces |
+| `harness workspace remove <name>` | Remove a registered workspace |
 
 ### `harness run` options
 
@@ -156,7 +159,19 @@ harness daemon logs     # View recent daemon logs
 harness daemon stop     # Stop and disable the service
 ```
 
-The daemon polls registered workspaces (in `~/.local/share/harness/workspaces/`) for `.harness/` artifact changes and fires plugin hooks when files are modified.
+The daemon uses real-time file watching (inotify) to monitor registered workspaces for `.harness/` artifact changes and fires plugin hooks when files are modified.
+
+### Workspaces
+
+Register project directories so the daemon can watch them:
+
+```bash
+harness workspace register ~/projects/my-app    # Register a project
+harness workspace list                           # List all registered workspaces
+harness workspace remove my-app                  # Remove a workspace
+```
+
+When the daemon is running and a workspace's `spec.md`, `status.md`, or `evaluation.md` changes, the corresponding plugin hooks fire automatically.
 
 ## Plugins
 
@@ -167,12 +182,15 @@ Plugins are TOML manifests placed in `~/.config/harness/plugins/`. They declare 
 name = "my-plugin"
 description = "Run tests after every build"
 version = "0.1.0"
+timeout_seconds = 60  # per-hook timeout (default: 30s)
 
 [hooks]
 before_plan = "echo 'Planning...'"
 after_build = "cargo test"
 before_evaluate = "cargo clippy"
 ```
+
+Hooks that exceed their timeout are killed automatically.
 
 Available hook points: `before_plan`, `after_plan`, `before_build`, `after_build`, `before_evaluate`, `after_evaluate`.
 
@@ -202,6 +220,7 @@ Hooks fire during `harness plan`, `harness build`, `harness evaluate`, and `harn
 name = "my-tests"
 description = "Run cargo test after every build"
 version = "0.1.0"
+timeout_seconds = 120  # long timeout for test suites
 
 [hooks]
 after_build = "cargo test 2>&1 || echo 'Tests failed!'"
@@ -251,18 +270,23 @@ Harness is evolving from a thin orchestrator into a full local-first agent platf
 - Hook discovery and logging (execution in Phase 4)
 
 **Phase 4: Executable Hooks + Active Daemon (done)**
-- Plugin hooks now execute shell commands with env vars
+- Plugin hooks execute shell commands with env vars
 - Hooks fire in all commands (plan, build, evaluate, run)
-- Daemon actively polls workspaces for artifact changes
-- `harness plugin list` shows executable commands per hook
 - Example plugin included in repo
 
-**Phase 5: Workspace Triggers + Custom Evaluators**
-- File-watch triggers for automatic re-evaluation
+**Phase 5: Workspace Management + Hook Robustness (done)**
+- `harness workspace register/list/remove` for daemon monitoring
+- Real-time file watching via inotify (replaces polling)
+- Configurable per-plugin hook timeout (default 30s, kills on exceed)
+- Hook output routed to TUI live output panel
+- Daemon auto-watches new workspace registrations
+
+**Phase 6: Custom Evaluators + Scheduled Tasks**
 - Custom evaluator strategies (Playwright MCP, curl, etc.)
 - Daemon-triggered builds from workspace changes
+- Scheduled recurring tasks
 
-**Phase 6: Multi-Agent Orchestration**
+**Phase 7: Multi-Agent Orchestration**
 - Parallel builder sessions
 - Agent specialization (frontend, backend, testing)
 - Cross-project learning via Shared Context Layer

@@ -7,3 +7,4 @@ pub mod status;
 pub mod reset;
 pub mod feedback;
 pub mod daemon;
+pub mod workspace;

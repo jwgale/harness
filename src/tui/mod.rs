@@ -144,7 +144,17 @@ fn run_loop(
     eval_timeout: u64,
     tx: &mpsc::Sender<TuiEvent>,
 ) -> Result<String, String> {
-    let pm = PluginManager::load();
+    // Create a channel that routes plugin hook output into the TUI output panel
+    let hook_tx = tx.clone();
+    let (plugin_tx, plugin_rx) = mpsc::channel::<String>();
+    let pm = PluginManager::load_with_channel(plugin_tx);
+
+    // Spawn a thread to forward plugin output into TUI events
+    std::thread::spawn(move || {
+        for line in plugin_rx {
+            let _ = hook_tx.send(TuiEvent::OutputLine(line));
+        }
+    });
 
     // Phase 1: Plan
     let _ = tx.send(TuiEvent::PhaseChange(TuiPhase::Plan, 0));

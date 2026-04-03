@@ -1,7 +1,11 @@
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc as std_mpsc;
+use std::time::Duration;
+
+use notify::{Event, EventKind, RecursiveMode, Watcher};
 
 use crate::plugins::{HookPoint, PluginManager};
 use crate::xdg;
@@ -144,18 +148,22 @@ fn status() -> Result<(), String> {
     if ws_dir.exists()
         && let Ok(entries) = fs::read_dir(&ws_dir)
     {
-        let workspaces: Vec<String> = entries
+        let workspaces: Vec<_> = entries
             .flatten()
-            .filter(|e| e.path().is_file())
-            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|e| e.path().is_file() && e.path().extension().is_some_and(|ext| ext == "path"))
             .collect();
         if !workspaces.is_empty() {
             println!();
             println!("Watched workspaces ({}):", workspaces.len());
             for ws in &workspaces {
-                let ws_name = ws.strip_suffix(".path").unwrap_or(ws);
-                if let Ok(path) = fs::read_to_string(ws_dir.join(ws)) {
-                    println!("  {ws_name}: {}", path.trim());
+                let ws_name = ws.path().file_stem()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if let Ok(path) = fs::read_to_string(ws.path()) {
+                    let p = path.trim();
+                    let has_harness = Path::new(p).join(".harness").exists();
+                    let tag = if has_harness { "active" } else { "no .harness/" };
+                    println!("  {ws_name}: {p} [{tag}]");
                 }
             }
         }
@@ -186,7 +194,6 @@ fn logs() -> Result<(), String> {
 }
 
 /// Internal entry point for the daemon process itself.
-/// Called via `harness daemon _run` by the systemd service.
 pub fn run_daemon_loop() -> Result<(), String> {
     let data_dir = xdg::data_dir();
     let pid = std::process::id();
@@ -194,7 +201,6 @@ pub fn run_daemon_loop() -> Result<(), String> {
     fs::write(&pid_file, pid.to_string())
         .map_err(|e| format!("Failed to write PID file: {e}"))?;
 
-    // Ensure workspaces directory exists
     let ws_dir = data_dir.join("workspaces");
     fs::create_dir_all(&ws_dir)
         .map_err(|e| format!("Failed to create workspaces dir: {e}"))?;
@@ -204,65 +210,105 @@ pub fn run_daemon_loop() -> Result<(), String> {
 
     let pm = PluginManager::load();
 
-    // Track file modification times for change detection
-    let mut known_states: HashMap<PathBuf, u64> = HashMap::new();
-    let poll_interval = std::time::Duration::from_secs(10);
+    // Set up notify watcher
+    let (notify_tx, notify_rx) = std_mpsc::channel();
+    let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
+        if let Ok(event) = res {
+            let _ = notify_tx.send(event);
+        }
+    }).map_err(|e| format!("Failed to create file watcher: {e}"))?;
+
+    // Watch the workspaces directory itself for new registrations
+    watcher.watch(ws_dir.as_ref(), RecursiveMode::NonRecursive)
+        .map_err(|e| format!("Failed to watch workspaces dir: {e}"))?;
+
+    // Watch all currently registered workspace .harness/ dirs
+    let mut watched_dirs: HashSet<PathBuf> = HashSet::new();
+    refresh_watches(&ws_dir, &mut watcher, &mut watched_dirs);
+
+    eprintln!("Watching {} workspace(s)", watched_dirs.len());
 
     loop {
-        // Scan registered workspaces for .harness/ changes
-        if let Ok(entries) = fs::read_dir(&ws_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file()
-                    && let Ok(workspace_path) = fs::read_to_string(&path)
-                {
-                    let workspace_path = workspace_path.trim();
-                    let harness_dir = PathBuf::from(workspace_path).join(".harness");
-                    if harness_dir.exists() {
-                        check_workspace_changes(&harness_dir, workspace_path, &mut known_states, &pm);
-                    }
-                }
+        // Process file events (block with timeout so we can periodically refresh)
+        match notify_rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(event) => {
+                handle_event(&event, &pm, &ws_dir, &mut watcher, &mut watched_dirs);
+            }
+            Err(std_mpsc::RecvTimeoutError::Timeout) => {
+                // Periodic refresh: pick up new workspaces
+                refresh_watches(&ws_dir, &mut watcher, &mut watched_dirs);
+            }
+            Err(std_mpsc::RecvTimeoutError::Disconnected) => {
+                eprintln!("File watcher disconnected, exiting.");
+                break;
             }
         }
-
-        std::thread::sleep(poll_interval);
     }
+
+    Ok(())
 }
 
-/// Check a workspace's .harness/ directory for file changes and fire hooks.
-fn check_workspace_changes(
-    harness_dir: &std::path::Path,
-    workspace_name: &str,
-    known_states: &mut HashMap<PathBuf, u64>,
+fn handle_event(
+    event: &Event,
     pm: &PluginManager,
+    ws_dir: &Path,
+    watcher: &mut impl Watcher,
+    watched_dirs: &mut HashSet<PathBuf>,
 ) {
-    let watched_files = [
-        ("spec.md", HookPoint::AfterPlan),
-        ("status.md", HookPoint::AfterBuild),
-        ("evaluation.md", HookPoint::AfterEvaluate),
-    ];
+    // Only care about data modifications and creates
+    if !matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+        return;
+    }
 
-    for (file, hook) in &watched_files {
-        let file_path = harness_dir.join(file);
-        if !file_path.exists() {
+    for path in &event.paths {
+        // If a workspace registration file changed, refresh watches
+        if path.starts_with(ws_dir) && path.extension().is_some_and(|e| e == "path") {
+            eprintln!("[daemon] Workspace registration changed, refreshing watches");
+            refresh_watches(ws_dir, watcher, watched_dirs);
             continue;
         }
-        let mtime = file_mtime(&file_path);
-        let prev = known_states.get(&file_path).copied();
 
-        if let Some(prev_mtime) = prev
-            && mtime != prev_mtime
-        {
-            eprintln!("[daemon] {workspace_name}: {file} changed, firing {}", hook.label());
-            pm.fire(*hook);
+        // Check if this is a harness artifact change
+        if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
+            let hook = match filename {
+                "spec.md" => Some(HookPoint::AfterPlan),
+                "status.md" => Some(HookPoint::AfterBuild),
+                "evaluation.md" => Some(HookPoint::AfterEvaluate),
+                _ => None,
+            };
+            if let Some(hook) = hook {
+                let ws_name = path.parent()
+                    .and_then(|p| p.parent())
+                    .and_then(|p| p.file_name())
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                eprintln!("[daemon] {ws_name}: {filename} changed, firing {}", hook.label());
+                pm.fire(hook);
+            }
         }
-        known_states.insert(file_path, mtime);
     }
 }
 
-fn file_mtime(path: &PathBuf) -> u64 {
-    fs::metadata(path)
-        .and_then(|m| m.modified())
-        .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs())
-        .unwrap_or(0)
+fn refresh_watches(
+    ws_dir: &Path,
+    watcher: &mut impl Watcher,
+    watched_dirs: &mut HashSet<PathBuf>,
+) {
+    let Ok(entries) = fs::read_dir(ws_dir) else { return };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().is_none_or(|e| e != "path") {
+            continue;
+        }
+        let Ok(workspace_path) = fs::read_to_string(&path) else { continue };
+        let harness_dir = PathBuf::from(workspace_path.trim()).join(".harness");
+
+        if harness_dir.exists() && !watched_dirs.contains(&harness_dir)
+            && watcher.watch(harness_dir.as_ref(), RecursiveMode::NonRecursive).is_ok()
+        {
+            eprintln!("[daemon] Now watching: {}", harness_dir.display());
+            watched_dirs.insert(harness_dir);
+        }
+    }
 }

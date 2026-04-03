@@ -75,6 +75,11 @@ enum Commands {
         #[command(subcommand)]
         action: PluginAction,
     },
+    /// Manage daemon workspaces
+    Workspace {
+        #[command(subcommand)]
+        action: WorkspaceAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -96,6 +101,22 @@ enum DaemonAction {
 enum PluginAction {
     /// List installed plugins
     List,
+}
+
+#[derive(Subcommand)]
+enum WorkspaceAction {
+    /// Register a project directory for daemon monitoring
+    Register {
+        /// Path to the project directory
+        path: String,
+    },
+    /// List registered workspaces
+    List,
+    /// Remove a registered workspace
+    Remove {
+        /// Name of the workspace to remove
+        name: String,
+    },
 }
 
 fn main() {
@@ -125,6 +146,11 @@ fn main() {
         },
         Commands::Plugin { action } => match action {
             PluginAction::List => plugins::list(),
+        },
+        Commands::Workspace { action } => match action {
+            WorkspaceAction::Register { path } => commands::workspace::register(&path),
+            WorkspaceAction::List => commands::workspace::list(),
+            WorkspaceAction::Remove { name } => commands::workspace::remove(&name),
         },
     };
 

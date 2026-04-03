@@ -1,8 +1,12 @@
 use serde::Deserialize;
 use std::fs;
 use std::process::Command;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use crate::xdg;
+
+const DEFAULT_HOOK_TIMEOUT: u64 = 30;
 
 #[derive(Debug, Deserialize)]
 pub struct PluginManifest {
@@ -11,6 +15,8 @@ pub struct PluginManifest {
     pub version: Option<String>,
     #[allow(dead_code)]
     pub backend: Option<String>,
+    /// Global timeout for all hooks in this plugin (seconds). Default: 30.
+    pub timeout_seconds: Option<u64>,
     pub hooks: Option<PluginHooks>,
 }
 
@@ -48,19 +54,45 @@ impl HookPoint {
     }
 }
 
+/// Output sink for hook messages. In TUI mode, sends to the output panel.
+/// In plain mode, prints to stderr.
+pub enum HookOutput {
+    Stderr,
+    Channel(mpsc::Sender<String>),
+}
+
+impl HookOutput {
+    fn send(&self, msg: &str) {
+        match self {
+            HookOutput::Stderr => eprintln!("{msg}"),
+            HookOutput::Channel(tx) => { let _ = tx.send(msg.to_string()); }
+        }
+    }
+}
+
 /// Manages loaded plugins and fires hooks at lifecycle points.
 pub struct PluginManager {
     plugins: Vec<PluginManifest>,
+    output: HookOutput,
 }
 
 impl PluginManager {
-    /// Load all plugins from the plugins directory.
+    /// Load all plugins, output to stderr.
     pub fn load() -> Self {
         let plugins = discover();
         if !plugins.is_empty() {
             eprintln!("Loaded {} plugin(s)", plugins.len());
         }
-        Self { plugins }
+        Self { plugins, output: HookOutput::Stderr }
+    }
+
+    /// Load all plugins, output to a TUI channel.
+    pub fn load_with_channel(tx: mpsc::Sender<String>) -> Self {
+        let plugins = discover();
+        if !plugins.is_empty() {
+            let _ = tx.send(format!("Loaded {} plugin(s)", plugins.len()));
+        }
+        Self { plugins, output: HookOutput::Channel(tx) }
     }
 
     /// Fire a hook point — execute registered commands for each plugin.
@@ -78,53 +110,82 @@ impl PluginManager {
                 HookPoint::AfterEvaluate => h.after_evaluate.as_deref(),
             });
             if let Some(cmd_str) = cmd_str {
-                eprintln!("[plugin:{}] {label} -> `{cmd_str}`", plugin.name);
-                execute_hook(&plugin.name, label, cmd_str, &project_name);
+                let timeout = plugin.timeout_seconds.unwrap_or(DEFAULT_HOOK_TIMEOUT);
+                self.output.send(&format!("[plugin:{}] {label} -> `{cmd_str}`", plugin.name));
+                self.execute_hook(&plugin.name, label, cmd_str, &project_name, timeout);
             }
         }
     }
 
-    #[allow(dead_code)]
-    pub fn count(&self) -> usize {
-        self.plugins.len()
-    }
-}
+    fn execute_hook(&self, plugin_name: &str, hook_label: &str, cmd_str: &str, project_name: &str, timeout_secs: u64) {
+        let cwd = std::env::current_dir().unwrap_or_default();
 
-/// Execute a hook command with environment variables.
-fn execute_hook(plugin_name: &str, hook_label: &str, cmd_str: &str, project_name: &str) {
-    let cwd = std::env::current_dir().unwrap_or_default();
+        let mut child = match Command::new("sh")
+            .args(["-c", cmd_str])
+            .env("HARNESS_HOOK", hook_label)
+            .env("HARNESS_PLUGIN", plugin_name)
+            .env("HARNESS_PROJECT", project_name)
+            .env("HARNESS_DIR", cwd.join(".harness").to_string_lossy().as_ref())
+            .env("HARNESS_PLUGINS_DIR", xdg::plugins_dir().to_string_lossy().as_ref())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                self.output.send(&format!("[plugin:{plugin_name}] hook {hook_label} failed to spawn: {e}"));
+                return;
+            }
+        };
 
-    let result = Command::new("sh")
-        .args(["-c", cmd_str])
-        .env("HARNESS_HOOK", hook_label)
-        .env("HARNESS_PLUGIN", plugin_name)
-        .env("HARNESS_PROJECT", project_name)
-        .env("HARNESS_DIR", cwd.join(".harness").to_string_lossy().as_ref())
-        .env("HARNESS_PLUGINS_DIR", xdg::plugins_dir().to_string_lossy().as_ref())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output();
+        let timeout = Duration::from_secs(timeout_secs);
+        let start = std::time::Instant::now();
 
-    match result {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stdout.trim().is_empty() {
-                for line in stdout.lines() {
-                    eprintln!("[plugin:{plugin_name}] {line}");
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    // Process finished — collect output
+                    let mut stdout_buf = Vec::new();
+                    let mut stderr_buf = Vec::new();
+                    if let Some(mut out) = child.stdout.take() {
+                        let _ = std::io::Read::read_to_end(&mut out, &mut stdout_buf);
+                    }
+                    if let Some(mut err) = child.stderr.take() {
+                        let _ = std::io::Read::read_to_end(&mut err, &mut stderr_buf);
+                    }
+                    let stdout = String::from_utf8_lossy(&stdout_buf);
+                    let stderr = String::from_utf8_lossy(&stderr_buf);
+
+                    for line in stdout.lines() {
+                        if !line.trim().is_empty() {
+                            self.output.send(&format!("[plugin:{plugin_name}] {line}"));
+                        }
+                    }
+                    for line in stderr.lines() {
+                        if !line.trim().is_empty() {
+                            self.output.send(&format!("[plugin:{plugin_name}] stderr: {line}"));
+                        }
+                    }
+                    if !status.success() {
+                        self.output.send(&format!("[plugin:{plugin_name}] hook {hook_label} exited with {status}"));
+                    }
+                    return;
+                }
+                Ok(None) => {
+                    if start.elapsed() > timeout {
+                        let _ = child.kill();
+                        self.output.send(&format!(
+                            "[plugin:{plugin_name}] hook {hook_label} killed after {timeout_secs}s timeout"
+                        ));
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(e) => {
+                    self.output.send(&format!("[plugin:{plugin_name}] hook {hook_label} wait error: {e}"));
+                    return;
                 }
             }
-            if !stderr.trim().is_empty() {
-                for line in stderr.lines() {
-                    eprintln!("[plugin:{plugin_name}] stderr: {line}");
-                }
-            }
-            if !output.status.success() {
-                eprintln!("[plugin:{plugin_name}] hook {hook_label} exited with {}", output.status);
-            }
-        }
-        Err(e) => {
-            eprintln!("[plugin:{plugin_name}] hook {hook_label} failed to execute: {e}");
         }
     }
 }
@@ -185,7 +246,8 @@ pub fn list() -> Result<(), String> {
     for p in &plugins {
         let desc = p.description.as_deref().unwrap_or("(no description)");
         let ver = p.version.as_deref().unwrap_or("?");
-        println!("  {} v{} — {}", p.name, ver, desc);
+        let timeout = p.timeout_seconds.unwrap_or(DEFAULT_HOOK_TIMEOUT);
+        println!("  {} v{} — {} (timeout: {timeout}s)", p.name, ver, desc);
         print_hooks(&p.hooks);
     }
     Ok(())
