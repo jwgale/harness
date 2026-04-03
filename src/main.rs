@@ -11,6 +11,7 @@ mod prompts;
 mod scl;
 mod scl_lifecycle;
 mod tui;
+mod vault;
 mod workflows;
 mod xdg;
 
@@ -121,6 +122,11 @@ enum Commands {
         #[command(subcommand)]
         action: WorkflowAction2,
     },
+    /// SanctumAI credential vault
+    Vault {
+        #[command(subcommand)]
+        action: VaultAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -189,6 +195,23 @@ enum WorkspaceAction {
         /// Name of the workspace to remove
         name: String,
     },
+}
+
+#[derive(Subcommand)]
+enum VaultAction {
+    /// Initialize vault configuration and generate signing key
+    Init,
+    /// Show vault connection status
+    Status,
+    /// Store a credential in the vault
+    #[command(name = "add")]
+    CredentialAdd {
+        /// Credential path/name (e.g. "slack/webhook-url")
+        name: String,
+    },
+    /// List credentials in the vault
+    #[command(name = "list")]
+    CredentialList,
 }
 
 #[derive(Subcommand)]
@@ -334,6 +357,12 @@ fn main() {
         Commands::Workflow { action } => match action {
             WorkflowAction2::List => commands::workflow_cmd::list(),
             WorkflowAction2::Validate { name } => commands::workflow_cmd::validate(&name),
+        },
+        Commands::Vault { action } => match action {
+            VaultAction::Init => commands::vault_cmd::init(),
+            VaultAction::Status => commands::vault_cmd::status(),
+            VaultAction::CredentialAdd { name } => commands::vault_cmd::credential_add(&name),
+            VaultAction::CredentialList => commands::vault_cmd::credential_list(),
         },
     };
 

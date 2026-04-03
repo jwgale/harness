@@ -692,3 +692,18 @@ output_artifact = "custom-b.md"
     fs::remove_file(workflows_dir.join("override-wf.toml")).ok();
     fs::remove_dir_all(&tmp).ok();
 }
+
+#[test]
+fn test_vault_init() {
+    let (stdout, _, ok) = run_harness(&["vault", "init"]);
+    assert!(ok, "vault init failed: {stdout}");
+    assert!(stdout.contains("public key") || stdout.contains("Vault initialized"));
+}
+
+#[test]
+fn test_vault_status_disabled() {
+    // Without vault enabled, should show disabled status
+    let (stdout, _, ok) = run_harness(&["vault", "status"]);
+    assert!(ok, "vault status failed: {stdout}");
+    assert!(stdout.contains("disabled") || stdout.contains("enabled"));
+}

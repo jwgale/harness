@@ -4,15 +4,20 @@ A CLI tool that orchestrates **planner -> builder -> evaluator** loops using sub
 
 Inspired by [Anthropic's harness architecture](https://www.anthropic.com/engineering/harness-design-long-running-apps) for long-running application development with Opus 4.6.
 
-## v0.8.0 Release Notes
+## v0.9.0 Release Notes
 
-Harness v0.8.0 completes the multi-agent TUI with streaming for all steps and an on-screen agent legend.
+Harness v0.9.0 integrates SanctumAI for secure credential management.
 
-**New in v0.8.0:**
-- **Sequential Streaming** — all multi-agent steps (not just parallel) now stream live output to the TUI
-- **Agent Legend** — status panel shows color-coded agent list with filter key hints
-- **Multi-Agent Header** — status panel title switches to "Harness Multi-Agent" when agents are active
-- **Loop Phase Updates** — iterative loops send real-time `Loop {round}/{max}` phase events to TUI
+**New in v0.9.0:**
+- **SanctumAI Vault** — `harness vault init/status/add/list` for Ed25519-authenticated credential management
+- **Vault-Aware Notifications** — Slack, Telegram, email, and webhook credentials auto-resolve from vault before config fallback
+- **Ed25519 Agent Identity** — auto-generated signing key for vault authentication
+- **28 Integration Tests** — including vault init and status tests
+
+**v0.8.0:**
+- **Sequential Streaming** — all multi-agent steps stream live to TUI
+- **Agent Legend** — color-coded agent list with filter key hints
+- **Multi-Agent Header** — "Harness Multi-Agent" title when agents active
 
 **v0.4.0:**
 - **Multi-Agent Orchestration** — `harness agent add/list/remove` for TOML-based agent definitions
@@ -118,6 +123,10 @@ harness evaluate --backend claude
 | `harness agent remove <name>` | Remove an agent definition |
 | `harness workflow list` | List defined workflows |
 | `harness workflow validate <name>` | Validate a workflow definition |
+| `harness vault init` | Initialize vault config and generate signing key |
+| `harness vault status` | Show vault connection status |
+| `harness vault add <name>` | Store a credential in the vault |
+| `harness vault list` | List credentials in the vault |
 
 ### `harness run` options
 
@@ -473,6 +482,67 @@ Omit the `events` array to fire on all events. Notification plugins can coexist 
 
 Example notification plugin templates are in the `plugins/` directory of this repo.
 
+## Credential Management (Powered by SanctumAI)
+
+Harness integrates with [SanctumAI](https://sanctumai.dev) for secure credential management. Instead of storing secrets in plaintext TOML config, credentials are stored in an encrypted vault with Ed25519-authenticated access.
+
+### Setup
+
+```bash
+# 1. Install and start a SanctumAI vault (see sanctumai.dev)
+# 2. Initialize harness vault integration
+harness vault init
+
+# 3. Register the agent's public key with your vault
+sanctum agent register harness --pubkey <key shown by init>
+
+# 4. Store credentials
+harness vault add notifications/slack/webhook-url
+harness vault add notifications/telegram/bot-token
+harness vault add notifications/telegram/chat-id
+```
+
+### Configuration
+
+Vault settings in `~/.config/harness/config.toml`:
+
+```toml
+[vault]
+enabled = true
+addr = "127.0.0.1:7600"    # TCP address or Unix socket path
+agent_name = "harness"
+```
+
+### How It Works
+
+When sending notifications, harness checks the vault first for credentials matching well-known paths:
+
+| Vault Path | Used By |
+|------------|---------|
+| `notifications/slack/webhook-url` | Slack notifications |
+| `notifications/telegram/bot-token` | Telegram notifications |
+| `notifications/telegram/chat-id` | Telegram notifications |
+| `notifications/email/to` | Email notifications |
+| `notifications/webhook/url` | Webhook notifications |
+
+If the vault is unreachable or the credential doesn't exist, harness falls back to plaintext values in the plugin TOML. This means vault integration is **opt-in** — existing notification plugins continue to work without a vault.
+
+### Commands
+
+```bash
+harness vault init       # Generate signing key, add [vault] to config
+harness vault status     # Show connection status and credential count
+harness vault add <path> # Store a credential (reads value from stdin)
+harness vault list       # List available credentials
+```
+
+### Security Model
+
+- **Ed25519 authentication** — agent identity is a signing key stored in `~/.local/share/harness/vault-key.bin` (mode 0600)
+- **Challenge-response** — vault issues a random challenge; harness signs it to prove identity
+- **Lease-based access** — retrieved credentials have a 5-minute TTL
+- **Audit trail** — all credential access is logged by the vault
+
 ## Multi-Agent Orchestration
 
 Define named agents and compose them into workflows for flexible multi-agent runs.
@@ -781,7 +851,14 @@ Harness is evolving from a thin orchestrator into a full local-first agent platf
 - Iterative loops send real-time phase updates to TUI
 - 26 integration tests
 
-**Phase 17: Agent Specialization + Cross-Project Learning**
+**Phase 17: SanctumAI Credential Vault Integration (done)**
+- `harness vault init/status/add/list` commands
+- Ed25519 agent identity with auto-generated signing key
+- Vault-aware notification credential resolution (vault-first, config-fallback)
+- Well-known credential paths for Slack, Telegram, email, webhook
+- 28 integration tests
+
+**Phase 18: Agent Specialization + Cross-Project Learning**
 - Agent specialization (frontend, backend, testing)
 - Cross-project learning via Shared Context Layer
 

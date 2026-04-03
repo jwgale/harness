@@ -13,3 +13,4 @@ pub mod context;
 pub mod evaluator_cmd;
 pub mod agent_cmd;
 pub mod workflow_cmd;
+pub mod vault_cmd;

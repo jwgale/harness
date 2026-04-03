@@ -1,6 +1,6 @@
 [package]
 name = "harness"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 description = "CLI harness for planner → builder → evaluator loops using subscription CLI tools"
 license = "MIT"
@@ -19,3 +19,8 @@ syntect = "5"
 dirs = "6"
 toml = "0.8"
 notify = { version = "7", default-features = false, features = ["macos_kqueue"] }
+sanctum-ai = "0.4"
+hex = "0.4"
+tokio = { version = "1", features = ["rt", "net"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"

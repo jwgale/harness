@@ -9,6 +9,7 @@ use std::process::Command;
 
 use crate::commands::evaluate::Verdict;
 use crate::scl_lifecycle;
+use crate::vault;
 use crate::xdg;
 
 /// Notification events that can trigger a notification.
@@ -126,20 +127,33 @@ fn send(config: &NotificationConfig, message: &str) -> Result<(), String> {
     }
 }
 
+/// Resolve a credential: try vault first (path = "notifications/<key>"), then fall back to config value.
+fn resolve_credential(config_value: Option<&str>, vault_path: &str) -> Option<String> {
+    // Try vault first
+    let vc = vault::load_config();
+    if vc.enabled
+        && let Ok(val) = vault::get_credential_string(&vc, vault_path)
+    {
+        return Some(val);
+    }
+    // Fall back to plaintext config
+    config_value.map(|s| s.to_string())
+}
+
 /// Send via Slack incoming webhook.
 fn send_slack(config: &NotificationConfig, message: &str) -> Result<(), String> {
-    let url = config.url.as_deref()
-        .ok_or_else(|| "Slack notification requires 'url' (incoming webhook URL)".to_string())?;
+    let url = resolve_credential(config.url.as_deref(), "notifications/slack/webhook-url")
+        .ok_or_else(|| "Slack notification requires 'url' or vault credential 'notifications/slack/webhook-url'".to_string())?;
     let payload = serde_json::json!({ "text": message });
-    curl_post_json(url, &payload)
+    curl_post_json(&url, &payload)
 }
 
 /// Send via Telegram Bot API.
 fn send_telegram(config: &NotificationConfig, message: &str) -> Result<(), String> {
-    let token = config.bot_token.as_deref()
-        .ok_or_else(|| "Telegram notification requires 'bot_token'".to_string())?;
-    let chat_id = config.chat_id.as_deref()
-        .ok_or_else(|| "Telegram notification requires 'chat_id'".to_string())?;
+    let token = resolve_credential(config.bot_token.as_deref(), "notifications/telegram/bot-token")
+        .ok_or_else(|| "Telegram requires 'bot_token' or vault credential 'notifications/telegram/bot-token'".to_string())?;
+    let chat_id = resolve_credential(config.chat_id.as_deref(), "notifications/telegram/chat-id")
+        .ok_or_else(|| "Telegram requires 'chat_id' or vault credential 'notifications/telegram/chat-id'".to_string())?;
     let url = format!("https://api.telegram.org/bot{token}/sendMessage");
     let payload = serde_json::json!({
         "chat_id": chat_id,
@@ -151,12 +165,13 @@ fn send_telegram(config: &NotificationConfig, message: &str) -> Result<(), Strin
 
 /// Send via email using the local `sendmail` or `mail` command.
 fn send_email(config: &NotificationConfig, message: &str) -> Result<(), String> {
-    let to = config.to.as_deref()
+    let to = resolve_credential(config.to.as_deref(), "notifications/email/to")
         .ok_or_else(|| "Email notification requires 'to' address".to_string())?;
-    let from = config.from.as_deref().unwrap_or("harness@localhost");
+    let from = resolve_credential(config.from.as_deref(), "notifications/email/from")
+        .unwrap_or_else(|| "harness@localhost".to_string());
 
     let output = Command::new("mail")
-        .args(["-s", "Harness Notification", "-r", from, to])
+        .args(["-s", "Harness Notification", "-r", &from, &to])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -180,14 +195,14 @@ fn send_email(config: &NotificationConfig, message: &str) -> Result<(), String> 
 
 /// Send via generic webhook (POST JSON body with message field).
 fn send_webhook(config: &NotificationConfig, message: &str) -> Result<(), String> {
-    let url = config.url.as_deref()
-        .ok_or_else(|| "Webhook notification requires 'url'".to_string())?;
+    let url = resolve_credential(config.url.as_deref(), "notifications/webhook/url")
+        .ok_or_else(|| "Webhook requires 'url' or vault credential 'notifications/webhook/url'".to_string())?;
     let payload = serde_json::json!({
         "event": "harness_notification",
         "message": message,
         "timestamp": chrono::Utc::now().to_rfc3339()
     });
-    curl_post_json(url, &payload)
+    curl_post_json(&url, &payload)
 }
 
 /// POST JSON to a URL using curl.
