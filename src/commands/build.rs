@@ -3,6 +3,7 @@ use crate::cli_backend::{self, Backend};
 use crate::config::Config;
 use crate::plugins::{PluginManager, HookPoint};
 use crate::prompts;
+use crate::scl_lifecycle;
 
 pub fn run(backend_override: Option<&str>) -> Result<(), String> {
     artifacts::ensure_harness_exists()?;
@@ -19,6 +20,7 @@ pub fn run(backend_override: Option<&str>) -> Result<(), String> {
     let prompt = prompts::builder_prompt()?;
     let output = cli_backend::run_builder(&backend, &config.model, &prompt, config.builder_timeout_seconds)?;
     pm.fire(HookPoint::AfterBuild);
+    scl_lifecycle::record_build_complete(&config.project_name, 1);
 
     println!("Builder finished.");
     if !output.is_empty() {

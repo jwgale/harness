@@ -5,6 +5,8 @@ mod config;
 mod global_config;
 mod plugins;
 mod prompts;
+mod scl;
+mod scl_lifecycle;
 mod tui;
 mod xdg;
 
@@ -172,8 +174,8 @@ enum ContextAction {
     },
     /// Record an entry to the shared context layer
     Record {
-        /// Entry type (e.g. decision, convention, progress)
-        entry_type: String,
+        /// Kind: architecture, decision, convention, active_work, insight, gotcha
+        kind: String,
         /// Content to record
         content: String,
     },
@@ -225,7 +227,7 @@ fn main() {
         Commands::Context { action } => match action {
             ContextAction::Status => commands::context::status(),
             ContextAction::Query { query } => commands::context::query(&query),
-            ContextAction::Record { entry_type, content } => commands::context::record(&entry_type, &content),
+            ContextAction::Record { kind, content } => commands::context::record(&kind, &content),
         },
     };
 

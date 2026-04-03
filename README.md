@@ -14,7 +14,7 @@ Harness v0.2.0 is the first production-ready release, built across 8 development
 - **Plugin System** — TOML-based plugins with 6 lifecycle hooks, configurable timeouts, hot-reload
 - **Workspace Management** — `harness workspace register/list/remove` with inotify file watching
 - **Scheduled Tasks** — cron-style scheduling with deduplication, local timezone, execution history, manual triggers
-- **Shared Context Layer** — built-in MCP integration gives every session access to long-term memory and decisions
+- **Shared Context Layer** — built-in MCP integration with direct HTTP client (0.1s queries), auto-recording of lifecycle events
 - **Mock Backend** — `--backend mock` for instant testing without real Claude/Codex
 - **Integration Tests** — 10+ tests running in under 1 second
 
@@ -307,21 +307,35 @@ When the SCL is enabled and reachable, harness automatically passes `--mcp-confi
 # Check connection
 harness context status
 
-# Query shared context
+# Query shared context (fast — direct MCP, no Claude session)
 harness context query "recent architectural decisions"
 
 # Record a decision
 harness context record decision "Chose SQLite over Postgres for local-first storage"
 ```
 
-Configure in `~/.config/harness/config.toml`:
+Valid record kinds: `architecture`, `decision`, `convention`, `active_work`, `insight`, `gotcha`.
+
+### Automatic Lifecycle Recording
+
+When `auto_record` is enabled (default), harness automatically records key events to SCL:
+- After planning: "Plan completed for project X"
+- After each build round: "Build round N completed"
+- After evaluation: verdict + scores
+
+This gives every future Claude Code session access to the full history of your harness runs. Disable with `auto_record = false`.
+
+### Configuration
+
 ```toml
+# ~/.config/harness/config.toml
 [shared_context]
 enabled = true
 url = "http://127.0.0.1:3100/mcp"
+auto_record = true    # record plan/build/evaluate events automatically
 ```
 
-Set `enabled = false` to disable SCL integration. If the SCL server is unreachable, harness silently falls back to running without it.
+Set `enabled = false` to disable SCL integration entirely. If the SCL server is unreachable, harness silently falls back to running without it. Health checks are cached for 60 seconds.
 
 ## Configuration
 
@@ -403,11 +417,17 @@ Harness is evolving from a thin orchestrator into a full local-first agent platf
 - Auto-generated global config with SCL settings
 - Graceful fallback when SCL is unreachable
 
-**Phase 10: Custom Evaluators + External Integrations**
+**Phase 10: SCL Polish + Auto-Recording (done)**
+- Direct MCP HTTP client (query in 0.1s, no Claude session needed)
+- Health check cached for 60 seconds
+- Automatic lifecycle recording (plan/build/evaluate events)
+- `auto_record` config toggle
+
+**Phase 11: Custom Evaluators + External Integrations**
 - Custom evaluator strategies (Playwright MCP, curl, etc.)
 - Notification hooks (Slack, email, webhooks)
 
-**Phase 11: Multi-Agent Orchestration**
+**Phase 12: Multi-Agent Orchestration**
 - Parallel builder sessions
 - Agent specialization (frontend, backend, testing)
 - Cross-project learning via Shared Context Layer

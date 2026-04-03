@@ -19,6 +19,7 @@ use crate::cli_backend::{self, Backend, StreamingProcess};
 use crate::commands::evaluate;
 use crate::config::Config;
 use crate::plugins::{PluginManager, HookPoint};
+use crate::scl_lifecycle;
 use crate::prompts;
 
 use self::output_panel::OutputPanel;
@@ -98,6 +99,7 @@ pub fn run_with_tui(
     let config_clone_builder_timeout = config.builder_timeout_seconds;
     let config_clone_eval_timeout = config.evaluator_timeout_seconds;
     let model_clone = model.clone();
+    let project_clone = project_name.clone();
     std::thread::spawn(move || {
         let result = run_loop(
             &backend,
@@ -106,6 +108,7 @@ pub fn run_with_tui(
             config_clone_builder_timeout,
             config_clone_eval_timeout,
             &tx_clone,
+            &project_clone,
         );
         let _ = tx_clone.send(TuiEvent::RunFinished(result));
     });
@@ -143,6 +146,7 @@ fn run_loop(
     builder_timeout: u64,
     eval_timeout: u64,
     tx: &mpsc::Sender<TuiEvent>,
+    project_name: &str,
 ) -> Result<String, String> {
     // Create a channel that routes plugin hook output into the TUI output panel
     let hook_tx = tx.clone();
@@ -167,6 +171,7 @@ fn run_loop(
     let plan_output = output?;
     artifacts::write_artifact("spec.md", &plan_output)?;
     pm.fire(HookPoint::AfterPlan);
+    scl_lifecycle::record_plan_complete(project_name);
     let _ = tx.send(TuiEvent::PhaseComplete);
 
     // Phase 2+3: Build → Evaluate loop
@@ -179,6 +184,7 @@ fn run_loop(
         let proc = cli_backend::run_builder_streaming(backend, model, &prompt, builder_timeout)?;
         let _output = drain_streaming(proc, tx)?;
         pm.fire(HookPoint::AfterBuild);
+        scl_lifecycle::record_build_complete(project_name, round);
         let _ = tx.send(TuiEvent::PhaseComplete);
 
         // Evaluate
@@ -195,6 +201,7 @@ fn run_loop(
         let verdict = evaluate::parse_verdict(&eval_output);
         let scores = EvalScores::parse(&eval_output);
         pm.fire(HookPoint::AfterEvaluate);
+        scl_lifecycle::record_eval_complete(project_name, round, &format!("{verdict:?}"), "");
         let _ = tx.send(TuiEvent::EvalResult(scores, verdict.clone()));
         let _ = tx.send(TuiEvent::PhaseComplete);
 

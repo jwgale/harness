@@ -12,6 +12,7 @@ pub struct GlobalConfig {
 pub struct SharedContextConfig {
     pub enabled: Option<bool>,
     pub url: Option<String>,
+    pub auto_record: Option<bool>,
 }
 
 impl SharedContextConfig {
@@ -21,6 +22,10 @@ impl SharedContextConfig {
 
     pub fn url(&self) -> &str {
         self.url.as_deref().unwrap_or("http://127.0.0.1:3100/mcp")
+    }
+
+    pub fn auto_record(&self) -> bool {
+        self.auto_record.unwrap_or(true)
     }
 }
 
@@ -41,44 +46,6 @@ impl GlobalConfig {
     }
 }
 
-/// Check if the SCL server is reachable.
-pub fn check_scl_health(url: &str) -> bool {
-    // Derive health URL from MCP URL: http://host:port/mcp -> http://host:port/health
-    let health_url = url.trim_end_matches("/mcp").to_string() + "/health";
-
-    std::process::Command::new("curl")
-        .args(["-fsSL", "--max-time", "2", &health_url])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// Generate a temporary MCP config JSON for Claude Code that includes the SCL server.
-/// Returns the path to the temp file.
-pub fn generate_mcp_config(scl_url: &str) -> Result<std::path::PathBuf, String> {
-    let config = serde_json::json!({
-        "mcpServers": {
-            "shared-context-layer": {
-                "url": scl_url
-            }
-        }
-    });
-
-    let mcp_dir = xdg::cache_dir().join("mcp");
-    fs::create_dir_all(&mcp_dir)
-        .map_err(|e| format!("Failed to create MCP cache dir: {e}"))?;
-
-    let path = mcp_dir.join("scl-config.json");
-    let json = serde_json::to_string_pretty(&config)
-        .map_err(|e| format!("Failed to serialize MCP config: {e}"))?;
-    fs::write(&path, json)
-        .map_err(|e| format!("Failed to write MCP config: {e}"))?;
-
-    Ok(path)
-}
-
 /// Write a default global config if none exists.
 pub fn ensure_global_config() -> Result<(), String> {
     let path = xdg::config_dir().join("config.toml");
@@ -93,6 +60,7 @@ pub fn ensure_global_config() -> Result<(), String> {
 [shared_context]
 enabled = true
 url = "http://127.0.0.1:3100/mcp"
+auto_record = true
 "#;
 
     fs::write(&path, default)

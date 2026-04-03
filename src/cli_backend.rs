@@ -3,7 +3,8 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use crate::global_config::{self, GlobalConfig};
+use crate::global_config::GlobalConfig;
+use crate::scl;
 
 pub enum Backend {
     Claude,
@@ -29,13 +30,13 @@ fn claude_cmd(model: &str) -> Command {
 
     // Inject SCL MCP config if enabled and reachable
     let gc = GlobalConfig::load();
-    if let Some(scl) = gc.scl()
-        && global_config::check_scl_health(scl.url())
-        && let Ok(mcp_path) = global_config::generate_mcp_config(scl.url())
+    if let Some(scl_cfg) = gc.scl()
+        && scl::is_healthy(scl_cfg.url())
+        && let Ok(mcp_path) = scl::generate_mcp_config(scl_cfg.url())
     {
         cmd.arg("--mcp-config");
         cmd.arg(mcp_path);
-        eprintln!("[scl] Connected: {}", scl.url());
+        eprintln!("[scl] Connected: {}", scl_cfg.url());
     }
 
     cmd

@@ -3,6 +3,7 @@ use crate::cli_backend::{self, Backend};
 use crate::config::Config;
 use crate::plugins::{PluginManager, HookPoint};
 use crate::prompts;
+use crate::scl_lifecycle;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Verdict {
@@ -36,6 +37,7 @@ pub fn run(backend_override: Option<&str>) -> Result<Verdict, String> {
     // Parse verdict
     let verdict = parse_verdict(&output);
     pm.fire(HookPoint::AfterEvaluate);
+    scl_lifecycle::record_eval_complete(&config.project_name, round, &format!("{verdict:?}"), "");
     println!("Evaluation written to .harness/evaluation.md");
     println!("Verdict: {verdict:?}");
 

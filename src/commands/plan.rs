@@ -3,6 +3,7 @@ use crate::cli_backend::{self, Backend};
 use crate::config::Config;
 use crate::plugins::{PluginManager, HookPoint};
 use crate::prompts;
+use crate::scl_lifecycle;
 
 pub fn run(backend_override: Option<&str>) -> Result<(), String> {
     artifacts::ensure_harness_exists()?;
@@ -18,6 +19,7 @@ pub fn run(backend_override: Option<&str>) -> Result<(), String> {
 
     artifacts::write_artifact("spec.md", &output)?;
     pm.fire(HookPoint::AfterPlan);
+    scl_lifecycle::record_plan_complete(&config.project_name);
 
     println!("Spec written to .harness/spec.md");
     println!("Review and edit the spec, then run `harness build` to start building.");
