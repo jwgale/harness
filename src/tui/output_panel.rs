@@ -1,5 +1,5 @@
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
@@ -7,8 +7,25 @@ use syntect::highlighting::{ThemeSet, Style as SyntectStyle};
 use syntect::parsing::SyntaxSet;
 use syntect::easy::HighlightLines;
 
+/// An output line tagged with an optional agent source.
+struct TaggedLine {
+    agent: Option<String>,
+    text: String,
+}
+
+/// View filter for the output panel.
+enum ViewFilter {
+    /// Show all lines from all agents.
+    All,
+    /// Show only lines from a specific agent.
+    Agent(usize), // index into known_agents
+}
+
 pub struct OutputPanel {
-    lines: Vec<String>,
+    lines: Vec<TaggedLine>,
+    /// Ordered list of agent names seen so far.
+    known_agents: Vec<String>,
+    filter: ViewFilter,
     scroll_offset: usize,
     follow_mode: bool,
     syntax_set: SyntaxSet,
@@ -19,6 +36,8 @@ impl OutputPanel {
     pub fn new() -> Self {
         Self {
             lines: Vec::new(),
+            known_agents: Vec::new(),
+            filter: ViewFilter::All,
             scroll_offset: 0,
             follow_mode: true,
             syntax_set: SyntaxSet::load_defaults_newlines(),
@@ -26,12 +45,107 @@ impl OutputPanel {
         }
     }
 
+    /// Push a line with no agent tag.
     pub fn push_line(&mut self, line: String) {
-        self.lines.push(line);
+        self.lines.push(TaggedLine { agent: None, text: line });
         if self.follow_mode {
-            // Will be clamped during render
             self.scroll_offset = usize::MAX;
         }
+    }
+
+    /// Push a line tagged with an agent name.
+    pub fn push_agent_line(&mut self, agent: &str, line: String) {
+        // Track agent names in discovery order
+        if !self.known_agents.iter().any(|a| a == agent) {
+            self.known_agents.push(agent.to_string());
+        }
+        self.lines.push(TaggedLine {
+            agent: Some(agent.to_string()),
+            text: line,
+        });
+        if self.follow_mode {
+            self.scroll_offset = usize::MAX;
+        }
+    }
+
+    /// Cycle to the next view filter. Returns a description of the new filter.
+    pub fn cycle_filter(&mut self) -> String {
+        if self.known_agents.is_empty() {
+            return "All".to_string();
+        }
+        self.filter = match &self.filter {
+            ViewFilter::All => ViewFilter::Agent(0),
+            ViewFilter::Agent(i) => {
+                let next = i + 1;
+                if next < self.known_agents.len() {
+                    ViewFilter::Agent(next)
+                } else {
+                    ViewFilter::All
+                }
+            }
+        };
+        // Reset scroll on filter change
+        self.scroll_offset = usize::MAX;
+        self.follow_mode = true;
+        self.current_filter_label()
+    }
+
+    /// Jump to a specific filter by index (0 = All, 1+ = agent index).
+    pub fn set_filter(&mut self, index: usize) {
+        if index == 0 {
+            self.filter = ViewFilter::All;
+        } else if index - 1 < self.known_agents.len() {
+            self.filter = ViewFilter::Agent(index - 1);
+        }
+        self.scroll_offset = usize::MAX;
+        self.follow_mode = true;
+    }
+
+    fn current_filter_label(&self) -> String {
+        match &self.filter {
+            ViewFilter::All => "All".to_string(),
+            ViewFilter::Agent(i) => {
+                self.known_agents.get(*i).cloned().unwrap_or_else(|| "?".to_string())
+            }
+        }
+    }
+
+    /// Count filtered lines without borrowing the full vec.
+    fn filtered_count(&self) -> usize {
+        match &self.filter {
+            ViewFilter::All => self.lines.len(),
+            ViewFilter::Agent(idx) => {
+                let name = match self.known_agents.get(*idx) {
+                    Some(n) => n.as_str(),
+                    None => return self.lines.len(),
+                };
+                self.lines.iter()
+                    .filter(|l| l.agent.as_deref() == Some(name) || l.agent.is_none())
+                    .count()
+            }
+        }
+    }
+
+    /// Get the visible lines after filtering.
+    fn filtered_lines(&self) -> Vec<&TaggedLine> {
+        match &self.filter {
+            ViewFilter::All => self.lines.iter().collect(),
+            ViewFilter::Agent(idx) => {
+                let name = match self.known_agents.get(*idx) {
+                    Some(n) => n.as_str(),
+                    None => return self.lines.iter().collect(),
+                };
+                self.lines.iter()
+                    .filter(|l| l.agent.as_deref() == Some(name) || l.agent.is_none())
+                    .collect()
+            }
+        }
+    }
+
+    /// Return the number of known agents (for keybinding hints).
+    #[allow(dead_code)]
+    pub fn agent_count(&self) -> usize {
+        self.known_agents.len()
     }
 
     pub fn scroll_up(&mut self, amount: usize) {
@@ -40,7 +154,8 @@ impl OutputPanel {
     }
 
     pub fn scroll_down(&mut self, amount: usize, visible_height: usize) {
-        let max = self.lines.len().saturating_sub(visible_height);
+        let filtered = self.filtered_lines();
+        let max = filtered.len().saturating_sub(visible_height);
         self.scroll_offset = (self.scroll_offset + amount).min(max);
         if self.scroll_offset >= max {
             self.follow_mode = true;
@@ -63,20 +178,49 @@ impl OutputPanel {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        let inner_height = area.height.saturating_sub(2) as usize; // borders
+        let inner_height = area.height.saturating_sub(2) as usize;
 
-        // Clamp scroll
-        let max_scroll = self.lines.len().saturating_sub(inner_height);
+        // Compute filtered count and clamp scroll before borrowing filtered lines
+        let filtered_count = self.filtered_count();
+        let max_scroll = filtered_count.saturating_sub(inner_height);
         if self.follow_mode || self.scroll_offset > max_scroll {
             self.scroll_offset = max_scroll;
         }
+        let scroll = self.scroll_offset;
 
-        let visible_lines = &self.lines[self.scroll_offset..self.lines.len().min(self.scroll_offset + inner_height)];
+        let filtered = self.filtered_lines();
+        let visible = &filtered[scroll..filtered.len().min(scroll + inner_height)];
+        let multi_agent = self.known_agents.len() > 1;
+        let agents_snapshot = self.known_agents.clone();
 
-        let styled_lines: Vec<Line> = visible_lines.iter().map(|l| self.highlight_line(l)).collect();
+        let styled_lines: Vec<Line> = visible.iter().map(|tl| {
+            if multi_agent {
+                if let Some(ref agent) = tl.agent {
+                    let color = agent_color(agent, &agents_snapshot);
+                    let tag = Span::styled(
+                        format!("[{agent}] "),
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    );
+                    let rest = self.highlight_line(&tl.text);
+                    let mut spans = vec![tag];
+                    spans.extend(rest.spans);
+                    Line::from(spans)
+                } else {
+                    self.highlight_line(&tl.text)
+                }
+            } else {
+                self.highlight_line(&tl.text)
+            }
+        }).collect();
 
-        let follow_indicator = if self.follow_mode { " [FOLLOW] " } else { " [SCROLL] " };
-        let title = format!(" Live Output {follow_indicator}");
+        let follow_indicator = if self.follow_mode { "FOLLOW" } else { "SCROLL" };
+        let filter_label = self.current_filter_label();
+        let filter_hint = if multi_agent {
+            format!(" | Filter: {filter_label} (` to cycle)")
+        } else {
+            String::new()
+        };
+        let title = format!(" Live Output [{follow_indicator}]{filter_hint} ");
 
         let block = Block::default()
             .title(title)
@@ -88,7 +232,6 @@ impl OutputPanel {
     }
 
     fn highlight_line<'a>(&self, line: &str) -> Line<'a> {
-        // Detect code block markers
         if line.trim_start().starts_with("```") {
             return Line::from(Span::styled(
                 line.to_string(),
@@ -96,7 +239,6 @@ impl OutputPanel {
             ));
         }
 
-        // Error lines
         if line.contains("error") || line.contains("Error") || line.contains("ERROR") {
             return Line::from(Span::styled(
                 line.to_string(),
@@ -104,7 +246,6 @@ impl OutputPanel {
             ));
         }
 
-        // Warning lines
         if line.contains("warning") || line.contains("Warning") || line.contains("WARN") {
             return Line::from(Span::styled(
                 line.to_string(),
@@ -112,7 +253,6 @@ impl OutputPanel {
             ));
         }
 
-        // File paths (contains / and a file extension)
         if (line.contains('/') || line.contains('\\')) && line.contains('.') && !line.contains(' ') {
             return Line::from(Span::styled(
                 line.to_string(),
@@ -120,7 +260,6 @@ impl OutputPanel {
             ));
         }
 
-        // Git output
         if line.starts_with("commit ") || line.starts_with("diff ") || line.starts_with("+++") || line.starts_with("---") {
             return Line::from(Span::styled(
                 line.to_string(),
@@ -128,14 +267,12 @@ impl OutputPanel {
             ));
         }
 
-        // Try syntect highlighting for code-looking lines
         if looks_like_code(line)
             && let Some(highlighted) = self.syntect_highlight(line)
         {
             return highlighted;
         }
 
-        // Default
         Line::from(Span::styled(
             line.to_string(),
             Style::default().fg(Color::White),
@@ -158,6 +295,16 @@ impl OutputPanel {
 
         Some(Line::from(spans))
     }
+}
+
+/// Assign a consistent color to an agent name.
+fn agent_color(name: &str, agents: &[String]) -> Color {
+    let colors = [
+        Color::LightCyan, Color::LightGreen, Color::LightYellow,
+        Color::LightMagenta, Color::LightBlue, Color::LightRed,
+    ];
+    let idx = agents.iter().position(|a| a == name).unwrap_or(0);
+    colors[idx % colors.len()]
 }
 
 fn looks_like_code(line: &str) -> bool {

@@ -4,15 +4,15 @@ A CLI tool that orchestrates **planner -> builder -> evaluator** loops using sub
 
 Inspired by [Anthropic's harness architecture](https://www.anthropic.com/engineering/harness-design-long-running-apps) for long-running application development with Opus 4.6.
 
-## v0.6.0 Release Notes
+## v0.7.0 Release Notes
 
-Harness v0.6.0 makes parallel/iterative multi-agent runs safe and visible.
+Harness v0.7.0 adds real-time streaming output for parallel agents and per-agent TUI filtering.
 
-**New in v0.6.0:**
-- **Artifact Isolation** — parallel agents write to `.harness/agents/<name>/` with automatic merge on completion
-- **Safe Parallel Hooks** — plugin hooks fire before/after parallel batches without contention
-- **Multi-Agent TUI** — status pane shows parallel batches, loop iterations, and named agent steps
-- **25 Integration Tests** — including parallel artifact isolation test
+**New in v0.7.0:**
+- **Real-time Streaming** — parallel agents use streaming backends with live output in the TUI
+- **Per-Agent Output** — TUI output panel tags lines with `[agent-name]` and supports filter cycling (backtick key)
+- **Full Artifact Overrides** — `output_artifact` in workflow steps works correctly in both sequential and parallel modes
+- **26 Integration Tests** — including parallel artifact override test
 
 **v0.4.0:**
 - **Multi-Agent Orchestration** — `harness agent add/list/remove` for TOML-based agent definitions
@@ -155,7 +155,9 @@ Keyboard shortcuts:
 - `j`/`k` or arrow keys — scroll
 - `PgUp`/`PgDn` — page scroll
 - `Tab` — toggle split/full-width output
-- `1`/`2`/`3` — switch view mode
+- `1`/`2`/`3` — switch view mode (split/output/status)
+- `` ` `` — cycle agent output filter (All → Agent 1 → Agent 2 → ...)
+- `4`/`5`/`6`/`7` — jump to All / Agent 1 / Agent 2 / Agent 3 filter
 
 ## Artifacts
 
@@ -544,6 +546,16 @@ Adjacent `parallel: true` steps form a batch that executes concurrently. Non-par
 
 **Artifact isolation:** Each parallel agent writes to its own namespace (`.harness/agents/<name>/`) to prevent write conflicts. On completion, outputs are automatically merged into the shared location with agent headers. Plugin hooks fire before and after each parallel batch.
 
+**Real-time streaming:** In TUI mode, parallel agents stream output live. Lines are prefixed with `[agent-name]` and color-coded per agent. Press backtick (`` ` ``) to cycle between viewing all output or filtering to a single agent. Keys `4`-`7` jump directly to All / Agent 1 / Agent 2 / Agent 3.
+
+**Artifact overrides:** Use `output_artifact` in workflow steps to control where output is written:
+```toml
+[[steps]]
+agent = "frontend-builder"
+parallel = true
+output_artifact = "frontend-status.md"
+```
+
 ### Iterative Build-Evaluate Loops
 
 Add `loop_until = "pass"` to a builder step to create an automatic revision loop:
@@ -755,7 +767,14 @@ Harness is evolving from a thin orchestrator into a full local-first agent platf
 - Multi-agent TUI with parallel batch display, loop counters, and agent step info
 - 25 integration tests
 
-**Phase 15: Agent Specialization + Cross-Project Learning**
+**Phase 15: Real-time Multi-Agent TUI Streaming + Full Artifact Overrides (done)**
+- Real-time streaming for parallel agents via channel multiplexing
+- Per-agent TUI output with color-coded `[agent-name]` prefixes
+- Agent filter cycling (backtick key) and direct filter keys (4-7)
+- Full `output_artifact` override support in parallel mode
+- 26 integration tests
+
+**Phase 16: Agent Specialization + Cross-Project Learning**
 - Agent specialization (frontend, backend, testing)
 - Cross-project learning via Shared Context Layer
 

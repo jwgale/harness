@@ -237,27 +237,59 @@ pub fn run_multi_agent(
 }
 
 /// Execute a sequence of step groups.
+/// When `tui_tx` is provided, parallel steps use streaming and send agent-tagged output.
 pub fn run_step_groups(
     groups: &[workflows::StepGroup],
     backend_override: Option<&str>,
     config: &Config,
     pm: &PluginManager,
 ) -> Result<(), String> {
+    run_step_groups_with_tui(groups, backend_override, config, pm, None)
+}
+
+/// Execute step groups with optional TUI streaming channel.
+pub fn run_step_groups_with_tui(
+    groups: &[workflows::StepGroup],
+    backend_override: Option<&str>,
+    config: &Config,
+    pm: &PluginManager,
+    tui_tx: Option<&std::sync::mpsc::Sender<crate::tui::TuiEvent>>,
+) -> Result<(), String> {
     for (gi, group) in groups.iter().enumerate() {
         match group {
             workflows::StepGroup::Single(step) => {
+                if let Some(tx) = tui_tx
+                    && let Ok(agent) = agents::load(&step.agent)
+                {
+                    let _ = tx.send(crate::tui::TuiEvent::PhaseChange(
+                        crate::tui::TuiPhase::AgentStep(agent.name.clone(), agent.role.clone()),
+                        (gi + 1) as u32,
+                    ));
+                }
                 println!("\n--- Group {}/{}: agent '{}' ---", gi + 1, groups.len(), step.agent);
                 run_single_step(step, backend_override, config, pm)?;
             }
             workflows::StepGroup::Parallel(steps) => {
                 let names: Vec<&str> = steps.iter().map(|s| s.agent.as_str()).collect();
+                if let Some(tx) = tui_tx {
+                    let _ = tx.send(crate::tui::TuiEvent::PhaseChange(
+                        crate::tui::TuiPhase::Parallel(names.iter().map(|s| s.to_string()).collect()),
+                        (gi + 1) as u32,
+                    ));
+                }
                 println!("\n--- Group {}/{}: parallel [{}] ---", gi + 1, groups.len(), names.join(", "));
                 scl_lifecycle::record_parallel_start(&config.project_name, &names);
-                run_parallel_steps(steps, backend_override, config, pm)?;
+                run_parallel_steps(steps, backend_override, config, pm, tui_tx)?;
                 scl_lifecycle::record_parallel_end(&config.project_name, &names);
             }
             workflows::StepGroup::Loop { body, evaluator, max_rounds } => {
                 let body_names: Vec<&str> = body.iter().map(|s| s.agent.as_str()).collect();
+                if let Some(tx) = tui_tx {
+                    let _ = tx.send(crate::tui::TuiEvent::PhaseChange(
+                        crate::tui::TuiPhase::Loop { round: 1, max: *max_rounds },
+                        (gi + 1) as u32,
+                    ));
+                }
                 println!(
                     "\n--- Group {}/{}: loop [{}] -> evaluator '{}' (max {max_rounds} rounds) ---",
                     gi + 1, groups.len(), body_names.join(", "), evaluator.agent
@@ -349,21 +381,20 @@ fn run_single_step(
     }
 }
 
-/// Run steps in parallel using std::thread with artifact isolation.
+/// Run steps in parallel using std::thread with artifact isolation and optional streaming.
 fn run_parallel_steps(
     steps: &[workflows::WorkflowStep],
     backend_override: Option<&str>,
     config: &Config,
     pm: &PluginManager,
+    tui_tx: Option<&std::sync::mpsc::Sender<crate::tui::TuiEvent>>,
 ) -> Result<(), String> {
     let mut handles = Vec::new();
 
-    // Determine hook points from the first step's role for a rough match
     let hook_roles: Vec<String> = steps.iter()
         .filter_map(|s| agents::load(&s.agent).ok().map(|a| a.role))
         .collect();
 
-    // Fire before hooks for the batch
     for role in &hook_roles {
         match role.as_str() {
             "planner" => pm.fire(HookPoint::BeforePlan),
@@ -373,11 +404,15 @@ fn run_parallel_steps(
         }
     }
 
+    // Create a shared channel for all agent streaming output
+    let tui_tx_clone = tui_tx.cloned();
+
     for step in steps {
         let step = step.clone();
         let agent_name = step.agent.clone();
         let backend_str = backend_override.map(|s| s.to_string());
         let config = config.clone();
+        let tui_sender = tui_tx_clone.clone();
 
         let handle = std::thread::spawn(move || -> Result<(), String> {
             let mut agent = agents::load(&step.agent)?;
@@ -396,28 +431,53 @@ fn run_parallel_steps(
 
             let prompt = build_agent_prompt(&agent, &config)?;
 
-            let output = if agent.role == "builder" {
-                cli_backend::run_builder(&backend, &model_owned, &prompt, timeout)?
+            // Use streaming when TUI channel is available
+            let output = if let Some(ref tx) = tui_sender {
+                let proc = if agent.role == "builder" {
+                    cli_backend::run_builder_streaming(&backend, &model_owned, &prompt, timeout)?
+                } else {
+                    cli_backend::run_oneshot_streaming(&backend, &model_owned, &prompt, timeout)?
+                };
+
+                // Drain streaming lines, forwarding to TUI with agent tag
+                let name = agent.name.clone();
+                loop {
+                    match proc.lines.recv_timeout(std::time::Duration::from_millis(50)) {
+                        Ok(line) => {
+                            let _ = tx.send(crate::tui::TuiEvent::AgentOutputLine(
+                                name.clone(), line,
+                            ));
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+                proc.wait()?
             } else {
-                cli_backend::run_oneshot(&backend, &model_owned, &prompt, timeout)?
+                // Non-streaming fallback
+                if agent.role == "builder" {
+                    cli_backend::run_builder(&backend, &model_owned, &prompt, timeout)?
+                } else {
+                    cli_backend::run_oneshot(&backend, &model_owned, &prompt, timeout)?
+                }
             };
 
             // Write to isolated agent namespace
-            let artifact = match agent.role.as_str() {
+            let default_artifact = match agent.role.as_str() {
                 "planner" => "spec.md",
                 "builder" => "status.md",
                 "evaluator" => "evaluation.md",
                 _ => "output.md",
             };
-            artifacts::write_agent_artifact(&agent.name, artifact, &output)?;
+            artifacts::write_agent_artifact(&agent.name, default_artifact, &output)?;
 
-            // Also write to custom output_artifact if specified
+            // Respect step-level output_artifact override
             if let Some(ref custom) = step.output_artifact {
                 artifacts::write_artifact(custom, &output)?;
             }
 
             scl_lifecycle::record_agent_step(&config.project_name, &agent.name, &agent.role, "completed");
-            eprintln!("  [parallel] agent '{}' [{}] -> .harness/agents/{}/{artifact}", agent.name, agent.role, agent.name);
+            eprintln!("  [parallel] agent '{}' [{}] -> .harness/agents/{}/{default_artifact}", agent.name, agent.role, agent.name);
 
             Ok(())
         });
@@ -435,7 +495,6 @@ fn run_parallel_steps(
         }
     }
 
-    // Fire after hooks
     for role in &hook_roles {
         match role.as_str() {
             "planner" => pm.fire(HookPoint::AfterPlan),
@@ -451,9 +510,7 @@ fn run_parallel_steps(
 
     // Merge isolated artifacts into shared location
     let name_refs: Vec<&str> = completed_names.iter().map(|s| s.as_str()).collect();
-    // Merge status.md from all builders
     let _ = artifacts::merge_agent_artifacts(&name_refs, "status.md");
-    // Merge any other common artifacts
     let _ = artifacts::merge_agent_artifacts(&name_refs, "output.md");
 
     println!("  All parallel agents completed (isolated artifacts in .harness/agents/).");

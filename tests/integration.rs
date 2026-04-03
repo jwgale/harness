@@ -644,3 +644,51 @@ fn test_parallel_artifact_isolation() {
     fs::remove_file(agents_dir.join("iso-b.toml")).ok();
     fs::remove_dir_all(&tmp).ok();
 }
+
+#[test]
+fn test_parallel_output_artifact_override() {
+    let tmp = tempdir("artoverride");
+    run_harness_in(&tmp, &["init", "Artifact override test"]);
+    fs::write(tmp.join(".harness/spec.md"), "# Test Spec").unwrap();
+
+    let agents_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp/.config"))
+        .join("harness/agents");
+    let workflows_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp/.config"))
+        .join("harness/workflows");
+    fs::create_dir_all(&agents_dir).unwrap();
+    fs::create_dir_all(&workflows_dir).unwrap();
+
+    fs::write(agents_dir.join("ov-a.toml"), "name = \"ov-a\"\nrole = \"custom\"\nbackend = \"mock\"\n").unwrap();
+    fs::write(agents_dir.join("ov-b.toml"), "name = \"ov-b\"\nrole = \"custom\"\nbackend = \"mock\"\n").unwrap();
+
+    // Workflow with output_artifact overrides in parallel steps
+    fs::write(workflows_dir.join("override-wf.toml"), r#"
+name = "override-wf"
+
+[[steps]]
+agent = "ov-a"
+parallel = true
+output_artifact = "custom-a.md"
+
+[[steps]]
+agent = "ov-b"
+parallel = true
+output_artifact = "custom-b.md"
+"#).unwrap();
+
+    let (stdout, stderr, ok) = run_harness_in(&tmp, &[
+        "run", "--workflow", "override-wf", "--no-tui",
+    ]);
+    assert!(ok, "override workflow failed: {stdout} {stderr}");
+
+    // Custom artifacts should exist
+    assert!(tmp.join(".harness/custom-a.md").exists(), "custom-a.md not found");
+    assert!(tmp.join(".harness/custom-b.md").exists(), "custom-b.md not found");
+
+    fs::remove_file(agents_dir.join("ov-a.toml")).ok();
+    fs::remove_file(agents_dir.join("ov-b.toml")).ok();
+    fs::remove_file(workflows_dir.join("override-wf.toml")).ok();
+    fs::remove_dir_all(&tmp).ok();
+}

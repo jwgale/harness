@@ -79,6 +79,8 @@ enum ViewMode {
 pub enum TuiEvent {
     /// A new output line from the current process.
     OutputLine(String),
+    /// A new output line tagged with an agent name (for multi-agent mode).
+    AgentOutputLine(String, String), // (agent_name, line)
     /// Phase changed.
     PhaseChange(TuiPhase, u32), // phase, round
     /// Process finished for the current phase, with full output.
@@ -295,6 +297,10 @@ fn tui_event_loop(
                     spec_parser::update_feature_status(features, &line);
                     output_panel.push_line(line);
                 }
+                Ok(TuiEvent::AgentOutputLine(agent, line)) => {
+                    spec_parser::update_feature_status(features, &line);
+                    output_panel.push_agent_line(&agent, line);
+                }
                 Ok(TuiEvent::PhaseChange(new_phase, new_round)) => {
                     phase = new_phase;
                     round = new_round;
@@ -408,6 +414,11 @@ fn tui_event_loop(
                 KeyCode::Char('1') => view_mode = ViewMode::Split,
                 KeyCode::Char('2') => view_mode = ViewMode::OutputOnly,
                 KeyCode::Char('3') => view_mode = ViewMode::StatusOnly,
+                KeyCode::Char('`') => { output_panel.cycle_filter(); }
+                KeyCode::Char('4') => output_panel.set_filter(0), // All
+                KeyCode::Char('5') => output_panel.set_filter(1), // Agent 1
+                KeyCode::Char('6') => output_panel.set_filter(2), // Agent 2
+                KeyCode::Char('7') => output_panel.set_filter(3), // Agent 3
                 _ => {}
             }
         }
@@ -518,8 +529,7 @@ fn run_multi_agent_with_events(
     parallel: bool,
     tx: &mpsc::Sender<TuiEvent>,
 ) -> Result<(), String> {
-    use crate::agents;
-    use crate::commands::run::run_step_groups;
+    use crate::commands::run::run_step_groups_with_tui;
     use crate::scl_lifecycle;
     use crate::workflows;
 
@@ -552,34 +562,7 @@ fn run_multi_agent_with_events(
             format!("Running workflow '{}' ({} groups)", wf.name, groups.len())
         ));
 
-        // Send phase events as we progress through groups
-        for (gi, group) in groups.iter().enumerate() {
-            match group {
-                workflows::StepGroup::Single(step) => {
-                    if let Ok(agent) = agents::load(&step.agent) {
-                        let _ = tx.send(TuiEvent::PhaseChange(
-                            TuiPhase::AgentStep(agent.name.clone(), agent.role.clone()), (gi + 1) as u32
-                        ));
-                    }
-                }
-                workflows::StepGroup::Parallel(steps) => {
-                    let names: Vec<String> = steps.iter().map(|s| s.agent.clone()).collect();
-                    let _ = tx.send(TuiEvent::PhaseChange(
-                        TuiPhase::Parallel(names), (gi + 1) as u32
-                    ));
-                }
-                workflows::StepGroup::Loop { max_rounds, .. } => {
-                    let _ = tx.send(TuiEvent::PhaseChange(
-                        TuiPhase::Loop { round: 1, max: *max_rounds }, (gi + 1) as u32
-                    ));
-                }
-            }
-            let _ = tx.send(TuiEvent::OutputLine(format!("--- Group {}/{} ---", gi + 1, groups.len())));
-        }
-
-        // Reset to first group and actually run
-        let _ = tx.send(TuiEvent::PhaseChange(TuiPhase::Plan, 0));
-        let result = run_step_groups(&groups, backend_override, &config, &pm);
+        let result = run_step_groups_with_tui(&groups, backend_override, &config, &pm, Some(tx));
 
         let status = if result.is_ok() { "completed" } else { "FAIL" };
         scl_lifecycle::record_agent_run_end(&config.project_name, &name_refs, status);
@@ -614,7 +597,7 @@ fn run_multi_agent_with_events(
             steps.into_iter().map(workflows::StepGroup::Single).collect()
         };
 
-        let result = run_step_groups(&groups, backend_override, &config, &pm);
+        let result = run_step_groups_with_tui(&groups, backend_override, &config, &pm, Some(tx));
         let status = if result.is_ok() { "completed" } else { "FAIL" };
         scl_lifecycle::record_agent_run_end(&config.project_name, &names, status);
         let _ = tx.send(TuiEvent::PhaseChange(TuiPhase::Done, 0));
