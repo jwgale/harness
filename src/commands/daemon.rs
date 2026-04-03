@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 
+use crate::commands::schedule;
 use crate::plugins::{HookPoint, PluginManager};
 use crate::xdg;
 
@@ -169,6 +170,16 @@ fn status() -> Result<(), String> {
         }
     }
 
+    // Show schedules
+    let schedules = schedule::load_schedules();
+    if !schedules.is_empty() {
+        println!();
+        println!("Scheduled tasks ({}):", schedules.len());
+        for (name, cron, cmd) in &schedules {
+            println!("  {name}: [{cron}] `{cmd}`");
+        }
+    }
+
     println!();
     println!("XDG directories:");
     println!("  config:  {}", xdg::config_dir().display());
@@ -205,10 +216,13 @@ pub fn run_daemon_loop() -> Result<(), String> {
     fs::create_dir_all(&ws_dir)
         .map_err(|e| format!("Failed to create workspaces dir: {e}"))?;
 
+    let plugins_dir = xdg::plugins_dir();
+
     eprintln!("Harness daemon started (PID {pid})");
     eprintln!("Watching workspaces in: {}", ws_dir.display());
+    eprintln!("Watching plugins in: {}", plugins_dir.display());
 
-    let pm = PluginManager::load();
+    let mut pm = PluginManager::load();
 
     // Set up notify watcher
     let (notify_tx, notify_rx) = std_mpsc::channel();
@@ -218,9 +232,13 @@ pub fn run_daemon_loop() -> Result<(), String> {
         }
     }).map_err(|e| format!("Failed to create file watcher: {e}"))?;
 
-    // Watch the workspaces directory itself for new registrations
+    // Watch the workspaces directory for new registrations
     watcher.watch(ws_dir.as_ref(), RecursiveMode::NonRecursive)
         .map_err(|e| format!("Failed to watch workspaces dir: {e}"))?;
+
+    // Watch the plugins directory for hot-reload
+    watcher.watch(plugins_dir.as_ref(), RecursiveMode::NonRecursive)
+        .map_err(|e| format!("Failed to watch plugins dir: {e}"))?;
 
     // Watch all currently registered workspace .harness/ dirs
     let mut watched_dirs: HashSet<PathBuf> = HashSet::new();
@@ -228,20 +246,30 @@ pub fn run_daemon_loop() -> Result<(), String> {
 
     eprintln!("Watching {} workspace(s)", watched_dirs.len());
 
+    // Track last minute for schedule checking
+    let mut last_schedule_minute: i64 = -1;
+
     loop {
-        // Process file events (block with timeout so we can periodically refresh)
         match notify_rx.recv_timeout(Duration::from_secs(30)) {
             Ok(event) => {
-                handle_event(&event, &pm, &ws_dir, &mut watcher, &mut watched_dirs);
+                handle_event(&event, &mut pm, &ws_dir, &plugins_dir, &mut watcher, &mut watched_dirs);
             }
             Err(std_mpsc::RecvTimeoutError::Timeout) => {
-                // Periodic refresh: pick up new workspaces
+                // Periodic: refresh watches and check schedules
                 refresh_watches(&ws_dir, &mut watcher, &mut watched_dirs);
             }
             Err(std_mpsc::RecvTimeoutError::Disconnected) => {
                 eprintln!("File watcher disconnected, exiting.");
                 break;
             }
+        }
+
+        // Check scheduled tasks once per minute
+        let now = chrono::Utc::now();
+        let current_minute = now.timestamp() / 60;
+        if current_minute != last_schedule_minute {
+            last_schedule_minute = current_minute;
+            run_due_schedules(&now);
         }
     }
 
@@ -250,25 +278,43 @@ pub fn run_daemon_loop() -> Result<(), String> {
 
 fn handle_event(
     event: &Event,
-    pm: &PluginManager,
+    pm: &mut PluginManager,
     ws_dir: &Path,
+    plugins_dir: &Path,
     watcher: &mut impl Watcher,
     watched_dirs: &mut HashSet<PathBuf>,
 ) {
-    // Only care about data modifications and creates
-    if !matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+    if !matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)) {
         return;
     }
 
     for path in &event.paths {
-        // If a workspace registration file changed, refresh watches
-        if path.starts_with(ws_dir) && path.extension().is_some_and(|e| e == "path") {
-            eprintln!("[daemon] Workspace registration changed, refreshing watches");
-            refresh_watches(ws_dir, watcher, watched_dirs);
+        // Plugin hot-reload: if a .toml in plugins dir changed
+        if path.starts_with(plugins_dir) && path.extension().is_some_and(|e| e == "toml") {
+            eprintln!("[daemon] Plugin change detected, hot-reloading plugins");
+            *pm = PluginManager::load();
             continue;
         }
 
-        // Check if this is a harness artifact change
+        // Workspace registration changes
+        if path.starts_with(ws_dir) && path.extension().is_some_and(|e| e == "path") {
+            if matches!(event.kind, EventKind::Remove(_)) {
+                // Workspace was removed — unwatch its .harness/ dir
+                if let Ok(content) = fs::read_to_string(path) {
+                    let harness_dir = PathBuf::from(content.trim()).join(".harness");
+                    if watched_dirs.remove(&harness_dir) {
+                        let _ = watcher.unwatch(harness_dir.as_ref());
+                        eprintln!("[daemon] Unwatched: {}", harness_dir.display());
+                    }
+                }
+            } else {
+                eprintln!("[daemon] Workspace registration changed, refreshing watches");
+                refresh_watches(ws_dir, watcher, watched_dirs);
+            }
+            continue;
+        }
+
+        // Harness artifact changes
         if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
             let hook = match filename {
                 "spec.md" => Some(HookPoint::AfterPlan),
@@ -296,6 +342,9 @@ fn refresh_watches(
 ) {
     let Ok(entries) = fs::read_dir(ws_dir) else { return };
 
+    // Collect currently registered workspace paths
+    let mut current_harness_dirs: HashSet<PathBuf> = HashSet::new();
+
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_file() || path.extension().is_none_or(|e| e != "path") {
@@ -304,11 +353,53 @@ fn refresh_watches(
         let Ok(workspace_path) = fs::read_to_string(&path) else { continue };
         let harness_dir = PathBuf::from(workspace_path.trim()).join(".harness");
 
-        if harness_dir.exists() && !watched_dirs.contains(&harness_dir)
-            && watcher.watch(harness_dir.as_ref(), RecursiveMode::NonRecursive).is_ok()
-        {
-            eprintln!("[daemon] Now watching: {}", harness_dir.display());
-            watched_dirs.insert(harness_dir);
+        if harness_dir.exists() {
+            current_harness_dirs.insert(harness_dir.clone());
+            if !watched_dirs.contains(&harness_dir)
+                && watcher.watch(harness_dir.as_ref(), RecursiveMode::NonRecursive).is_ok()
+            {
+                eprintln!("[daemon] Now watching: {}", harness_dir.display());
+                watched_dirs.insert(harness_dir);
+            }
+        }
+    }
+
+    // Unwatch dirs that are no longer registered
+    let stale: Vec<PathBuf> = watched_dirs.difference(&current_harness_dirs).cloned().collect();
+    for dir in stale {
+        let _ = watcher.unwatch(dir.as_ref());
+        eprintln!("[daemon] Unwatched (removed): {}", dir.display());
+        watched_dirs.remove(&dir);
+    }
+}
+
+fn run_due_schedules(now: &chrono::DateTime<chrono::Utc>) {
+    let schedules = schedule::load_schedules();
+    for (name, cron, cmd) in &schedules {
+        if schedule::cron_matches(cron, now) {
+            eprintln!("[daemon] Schedule '{name}' firing: `{cmd}`");
+            let result = Command::new("sh")
+                .args(["-c", cmd.as_str()])
+                .env("HARNESS_SCHEDULE", name)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output();
+
+            match result {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    for line in stdout.lines().chain(stderr.lines()) {
+                        if !line.trim().is_empty() {
+                            eprintln!("[schedule:{name}] {line}");
+                        }
+                    }
+                    if !output.status.success() {
+                        eprintln!("[schedule:{name}] exited with {}", output.status);
+                    }
+                }
+                Err(e) => eprintln!("[schedule:{name}] failed to execute: {e}"),
+            }
         }
     }
 }

@@ -68,9 +68,12 @@ harness evaluate --backend claude
 | `harness feedback` | Show latest evaluator feedback |
 | `harness daemon <action>` | Manage persistent daemon (start/stop/status/logs) |
 | `harness plugin list` | List installed plugins |
-| `harness workspace register <path>` | Register a project for daemon monitoring |
+| `harness workspace register [path]` | Register a project for daemon monitoring (default: `.`) |
 | `harness workspace list` | List registered workspaces |
 | `harness workspace remove <name>` | Remove a registered workspace |
+| `harness schedule add <name> "<cron>" "<cmd>"` | Add a cron-style scheduled task |
+| `harness schedule list` | List scheduled tasks |
+| `harness schedule remove <name>` | Remove a scheduled task |
 
 ### `harness run` options
 
@@ -231,6 +234,30 @@ after_build = "cargo test 2>&1 || echo 'Tests failed!'"
 
 See `plugins/example.toml` in the repo for a complete example with all hook points.
 
+The daemon hot-reloads plugins automatically — add, edit, or remove TOML files and the daemon picks up changes instantly.
+
+## Scheduled Tasks
+
+Schedule commands to run on a cron-style schedule via the daemon:
+
+```bash
+# Run a full harness loop every day at 8:30 AM UTC
+harness schedule add daily-build "30 8 * * *" "cd ~/projects/my-app && harness run --backend claude --no-tui"
+
+# Run tests every hour
+harness schedule add hourly-tests "0 * * * *" "cd ~/projects/my-app && cargo test"
+
+# List schedules
+harness schedule list
+
+# Remove a schedule
+harness schedule remove daily-build
+```
+
+Schedules are stored as plugin TOML files and executed by the daemon. The daemon must be running for schedules to fire.
+
+Cron format: `minute hour day-of-month month day-of-week` with support for `*`, `*/N`, ranges (`1-5`), and lists (`1,5,10`).
+
 ## Configuration
 
 `.harness/config.json` is created by `harness init`:
@@ -279,14 +306,20 @@ Harness is evolving from a thin orchestrator into a full local-first agent platf
 - Real-time file watching via inotify (replaces polling)
 - Configurable per-plugin hook timeout (default 30s, kills on exceed)
 - Hook output routed to TUI live output panel
-- Daemon auto-watches new workspace registrations
 
-**Phase 6: Custom Evaluators + Scheduled Tasks**
+**Phase 6: Hot-Reload + Scheduled Tasks + Tests (done)**
+- Daemon hot-reloads plugins on TOML file changes
+- `harness workspace register` defaults to current dir
+- Watch cleanup on workspace removal
+- `harness schedule add/list/remove` with cron-style expressions
+- Integration test suite (8 tests covering workspace, schedule, hooks, init)
+- Daemon executes scheduled tasks at minute-level precision
+
+**Phase 7: Custom Evaluators + External Integrations**
 - Custom evaluator strategies (Playwright MCP, curl, etc.)
-- Daemon-triggered builds from workspace changes
-- Scheduled recurring tasks
+- Notification hooks (Slack, email, webhooks)
 
-**Phase 7: Multi-Agent Orchestration**
+**Phase 8: Multi-Agent Orchestration**
 - Parallel builder sessions
 - Agent specialization (frontend, backend, testing)
 - Cross-project learning via Shared Context Layer

@@ -7,18 +7,24 @@ fn workspaces_dir() -> PathBuf {
     xdg::data_dir().join("workspaces")
 }
 
-pub fn register(path: &str) -> Result<(), String> {
+pub fn register(path: Option<&str>) -> Result<(), String> {
     xdg::ensure_dirs()?;
     let ws_dir = workspaces_dir();
     fs::create_dir_all(&ws_dir)
         .map_err(|e| format!("Failed to create workspaces dir: {e}"))?;
 
-    let abs_path = if Path::new(path).is_absolute() {
-        PathBuf::from(path)
-    } else {
-        std::env::current_dir()
-            .map_err(|e| format!("Failed to get current dir: {e}"))?
-            .join(path)
+    let abs_path = match path {
+        Some(p) if p != "." => {
+            if Path::new(p).is_absolute() {
+                PathBuf::from(p)
+            } else {
+                std::env::current_dir()
+                    .map_err(|e| format!("Failed to get current dir: {e}"))?
+                    .join(p)
+            }
+        }
+        _ => std::env::current_dir()
+            .map_err(|e| format!("Failed to get current dir: {e}"))?,
     };
 
     let canon = abs_path.canonicalize()

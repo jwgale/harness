@@ -18,6 +18,9 @@ pub struct PluginManifest {
     /// Global timeout for all hooks in this plugin (seconds). Default: 30.
     pub timeout_seconds: Option<u64>,
     pub hooks: Option<PluginHooks>,
+    /// Schedule config (for scheduled task plugins). Ignored by the plugin system.
+    #[allow(dead_code)]
+    pub schedule: Option<toml::Value>,
 }
 
 #[derive(Debug, Deserialize, Default)]

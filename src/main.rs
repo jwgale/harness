@@ -80,6 +80,11 @@ enum Commands {
         #[command(subcommand)]
         action: WorkspaceAction,
     },
+    /// Manage scheduled tasks
+    Schedule {
+        #[command(subcommand)]
+        action: ScheduleAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -104,11 +109,31 @@ enum PluginAction {
 }
 
 #[derive(Subcommand)]
+enum ScheduleAction {
+    /// Add a scheduled task (cron-style)
+    Add {
+        /// Name for this schedule
+        name: String,
+        /// Cron expression (5 fields: min hour dom mon dow)
+        cron: String,
+        /// Command to execute
+        command: String,
+    },
+    /// List scheduled tasks
+    List,
+    /// Remove a scheduled task
+    Remove {
+        /// Name of the schedule to remove
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum WorkspaceAction {
-    /// Register a project directory for daemon monitoring
+    /// Register a project directory for daemon monitoring (default: current dir)
     Register {
-        /// Path to the project directory
-        path: String,
+        /// Path to the project directory (default: current dir)
+        path: Option<String>,
     },
     /// List registered workspaces
     List,
@@ -148,9 +173,14 @@ fn main() {
             PluginAction::List => plugins::list(),
         },
         Commands::Workspace { action } => match action {
-            WorkspaceAction::Register { path } => commands::workspace::register(&path),
+            WorkspaceAction::Register { path } => commands::workspace::register(path.as_deref()),
             WorkspaceAction::List => commands::workspace::list(),
             WorkspaceAction::Remove { name } => commands::workspace::remove(&name),
+        },
+        Commands::Schedule { action } => match action {
+            ScheduleAction::Add { name, cron, command } => commands::schedule::add(&name, &cron, &command),
+            ScheduleAction::List => commands::schedule::list(),
+            ScheduleAction::Remove { name } => commands::schedule::remove(&name),
         },
     };
 
