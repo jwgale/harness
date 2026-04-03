@@ -277,7 +277,7 @@ Cron format: `minute hour day-of-month month day-of-week` (local time) with supp
 
 - **Deduplication** — each schedule tracks its last execution minute; daemon restarts won't fire the same schedule twice in the same minute
 - **Local timezone** — cron expressions match against your local time, not UTC
-- **Execution history** — every execution is logged to `~/.local/share/harness/schedule-history.jsonl`
+- **Execution history** — every execution is logged to `~/.local/share/harness/schedule-history.jsonl` (entries older than 60 days are automatically pruned)
 
 View recent executions:
 ```bash
@@ -355,7 +355,7 @@ Harness is evolving from a thin orchestrator into a full local-first agent platf
 **Phase 8: Final Polish + v0.2.0 (done)**
 - Atomic state writes (write-to-temp + rename)
 - `harness schedule run <name>` manual trigger
-- History auto-rotation (500 entries max)
+- History auto-pruning (entries older than 60 days removed)
 - Version bump to v0.2.0
 
 **Phase 9: Custom Evaluators + External Integrations**

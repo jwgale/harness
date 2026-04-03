@@ -5,7 +5,7 @@ use std::process::Command;
 
 use crate::xdg;
 
-const MAX_HISTORY_LINES: usize = 500;
+const HISTORY_RETENTION_DAYS: i64 = 60;
 
 fn history_path() -> std::path::PathBuf {
     xdg::data_dir().join("schedule-history.jsonl")
@@ -372,7 +372,7 @@ fn mark_run(name: &str) {
     save_state_atomic(&state);
 }
 
-/// Append an entry to schedule-history.jsonl, then rotate if needed.
+/// Append an entry to schedule-history.jsonl, then prune old entries.
 pub fn record_history(name: &str, command: &str, exit_code: i32, duration_ms: u64) {
     let entry = serde_json::json!({
         "timestamp": chrono::Local::now().to_rfc3339(),
@@ -387,22 +387,28 @@ pub fn record_history(name: &str, command: &str, exit_code: i32, duration_ms: u6
         let _ = writeln!(file, "{}", entry);
     }
 
-    rotate_history();
+    prune_history();
 }
 
-/// Keep only the last MAX_HISTORY_LINES entries in the history file.
-fn rotate_history() {
+/// Remove history entries older than HISTORY_RETENTION_DAYS.
+fn prune_history() {
     let path = history_path();
     let Ok(content) = fs::read_to_string(&path) else { return };
-    let lines: Vec<&str> = content.lines().collect();
+    let cutoff = chrono::Local::now() - chrono::Duration::days(HISTORY_RETENTION_DAYS);
 
-    if lines.len() <= MAX_HISTORY_LINES {
-        return;
-    }
+    let kept: Vec<&str> = content.lines().filter(|line| {
+        serde_json::from_str::<serde_json::Value>(line)
+            .ok()
+            .and_then(|v| v["timestamp"].as_str().map(|s| s.to_string()))
+            .and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
+            .map(|dt| dt >= cutoff)
+            .unwrap_or(true) // keep unparseable lines
+    }).collect();
 
-    let keep = &lines[lines.len() - MAX_HISTORY_LINES..];
-    let tmp_path = path.with_extension("jsonl.tmp");
-    if fs::write(&tmp_path, keep.join("\n") + "\n").is_ok() {
-        let _ = fs::rename(&tmp_path, &path);
+    if kept.len() < content.lines().count() {
+        let tmp_path = path.with_extension("jsonl.tmp");
+        if fs::write(&tmp_path, kept.join("\n") + "\n").is_ok() {
+            let _ = fs::rename(&tmp_path, &path);
+        }
     }
 }
