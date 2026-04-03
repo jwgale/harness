@@ -2,13 +2,15 @@ mod artifacts;
 mod cli_backend;
 mod commands;
 mod config;
+mod plugins;
 mod prompts;
 mod tui;
+mod xdg;
 
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "harness", about = "Orchestrate planner → builder → evaluator loops using subscription CLI tools")]
+#[command(name = "harness", version, about = "Orchestrate planner → builder → evaluator loops using subscription CLI tools")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -63,6 +65,13 @@ enum Commands {
     Reset,
     /// Show latest evaluator feedback
     Feedback,
+    /// Manage the persistent daemon (start/stop/status)
+    Daemon {
+        /// Action: start, stop, or status
+        action: String,
+    },
+    /// List installed plugins
+    Plugins,
 }
 
 fn main() {
@@ -83,6 +92,8 @@ fn main() {
         Commands::Status => commands::status::run(),
         Commands::Reset => commands::reset::run(),
         Commands::Feedback => commands::feedback::run(),
+        Commands::Daemon { action } => commands::daemon::run(&action),
+        Commands::Plugins => plugins::list(),
     };
 
     if let Err(e) = result {

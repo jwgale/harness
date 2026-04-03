@@ -6,11 +6,29 @@ Inspired by [Anthropic's harness architecture](https://www.anthropic.com/enginee
 
 ## Installation
 
+### One-liner (Linux)
+
 ```bash
+curl -fsSL https://raw.githubusercontent.com/jwgale/harness/main/install.sh | sh
+```
+
+This installs the `harness` binary to `~/.local/bin/`. If no pre-built release exists yet, it builds from source (requires Rust).
+
+### From source
+
+```bash
+git clone https://github.com/jwgale/harness.git
+cd harness
 cargo install --path .
 ```
 
 Requires Rust 2024 edition (1.85+).
+
+### Verify
+
+```bash
+harness --version
+```
 
 ## Prerequisites
 
@@ -48,6 +66,8 @@ harness evaluate --backend claude
 | `harness status` | Print current harness state |
 | `harness reset` | Generate `handoff.md` for context reset |
 | `harness feedback` | Show latest evaluator feedback |
+| `harness daemon <action>` | Manage persistent daemon (start/stop/status) |
+| `harness plugins` | List installed plugins |
 
 ### `harness run` options
 
@@ -87,7 +107,7 @@ Keyboard shortcuts:
 
 ## Artifacts
 
-All state lives in `.harness/`:
+Per-project state lives in `.harness/` (inside the project directory):
 
 ```
 .harness/
@@ -104,6 +124,17 @@ All state lives in `.harness/`:
     run-001.json       # Run metadata (timing, outcome)
 ```
 
+## Directory Layout (XDG)
+
+Global state follows XDG conventions:
+
+| Path | Purpose |
+|------|---------|
+| `~/.config/harness/` | Global config, plugin manifests |
+| `~/.config/harness/plugins/` | Plugin TOML files |
+| `~/.local/share/harness/` | Persistent data (daemon PID, run history) |
+| `~/.cache/harness/` | Temporary cache |
+
 ## Customizing Prompts
 
 The binary embeds default prompt templates. To override them, place custom versions in `.harness/prompts/`:
@@ -113,6 +144,25 @@ The binary embeds default prompt templates. To override them, place custom versi
 - `.harness/prompts/evaluator.md`
 
 If a file exists in `.harness/prompts/`, it takes precedence over the embedded default.
+
+## Plugins
+
+Plugins are TOML manifests placed in `~/.config/harness/plugins/`. Discovery is implemented; execution hooks are coming.
+
+```toml
+# ~/.config/harness/plugins/my-plugin.toml
+name = "my-plugin"
+description = "Run tests after every build"
+version = "0.1.0"
+
+[hooks]
+after_build = "cargo test"
+```
+
+List installed plugins:
+```bash
+harness plugins
+```
 
 ## Configuration
 
@@ -129,6 +179,38 @@ If a file exists in `.harness/prompts/`, it takes precedence over the embedded d
   "created_at": "2026-04-01T12:00:00Z"
 }
 ```
+
+## Roadmap to OpenClaw-Style Harness
+
+Harness is evolving from a thin orchestrator into a full local-first agent platform.
+
+**Phase 1: Core Orchestrator (done)**
+- Plan -> build -> evaluate -> revise loop
+- TUI with live streaming output
+- Prompt override system
+- Installable binary
+
+**Phase 2: Local Install Polish (done)**
+- One-liner installer with GitHub Releases
+- XDG-compliant directory layout
+- Plugin/skill system foundation
+- Daemon skeleton
+
+**Phase 3: Persistent Daemon**
+- Background agent runner (`harness daemon start`)
+- Workspace-based agent sessions
+- Systemd user service integration
+- File-watch triggers for automatic re-evaluation
+
+**Phase 4: Plugin Execution**
+- Hook execution (before/after plan, build, evaluate)
+- Custom evaluator strategies (Playwright MCP, curl, etc.)
+- Plugin marketplace / registry
+
+**Phase 5: Multi-Agent Orchestration**
+- Parallel builder sessions
+- Agent specialization (frontend, backend, testing)
+- Cross-project learning via Shared Context Layer
 
 ## License
 

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "CLI harness for planner → builder → evaluator loops using subscription CLI tools"
 license = "MIT"
+repository = "https://github.com/jwgale/harness"
 keywords = ["cli", "orchestration", "ai", "harness", "agent"]
 categories = ["command-line-utilities", "development-tools"]
 
@@ -15,3 +16,5 @@ chrono = { version = "0.4", features = ["serde"] }
 ratatui = "0.29"
 crossterm = "0.28"
 syntect = "5"
+dirs = "6"
+toml = "0.8"
