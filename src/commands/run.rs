@@ -267,7 +267,7 @@ pub fn run_step_groups_with_tui(
                     ));
                 }
                 println!("\n--- Group {}/{}: agent '{}' ---", gi + 1, groups.len(), step.agent);
-                run_single_step(step, backend_override, config, pm)?;
+                run_single_step_streaming(step, backend_override, config, pm, tui_tx)?;
             }
             workflows::StepGroup::Parallel(steps) => {
                 let names: Vec<&str> = steps.iter().map(|s| s.agent.as_str()).collect();
@@ -294,19 +294,20 @@ pub fn run_step_groups_with_tui(
                     "\n--- Group {}/{}: loop [{}] -> evaluator '{}' (max {max_rounds} rounds) ---",
                     gi + 1, groups.len(), body_names.join(", "), evaluator.agent
                 );
-                run_iterative_loop(body, evaluator, *max_rounds, backend_override, config, pm)?;
+                run_iterative_loop(body, evaluator, *max_rounds, backend_override, config, pm, tui_tx)?;
             }
         }
     }
     Ok(())
 }
 
-/// Run a single step.
-fn run_single_step(
+/// Run a single step, streaming output to TUI when channel is provided.
+fn run_single_step_streaming(
     step: &workflows::WorkflowStep,
     backend_override: Option<&str>,
     config: &Config,
     pm: &PluginManager,
+    tui_tx: Option<&std::sync::mpsc::Sender<crate::tui::TuiEvent>>,
 ) -> Result<Option<Verdict>, String> {
     let mut agent = agents::load(&step.agent)?;
     if step.prompt.is_some() {
@@ -320,11 +321,14 @@ fn run_single_step(
         _ => config.evaluator_timeout_seconds,
     });
 
+    let prompt = build_agent_prompt(&agent, config)?;
+
+    // Run with streaming when TUI channel is available, otherwise non-streaming
+    let output = run_agent_invocation(&agent, &backend, model, &prompt, timeout, tui_tx)?;
+
     match agent.role.as_str() {
         "planner" => {
             pm.fire(HookPoint::BeforePlan);
-            let prompt = build_agent_prompt(&agent, config)?;
-            let output = cli_backend::run_oneshot(&backend, model, &prompt, timeout)?;
             artifacts::write_artifact("spec.md", &output)?;
             pm.fire(HookPoint::AfterPlan);
             scl_lifecycle::record_agent_step(&config.project_name, &agent.name, "planner", "completed");
@@ -333,8 +337,6 @@ fn run_single_step(
         }
         "builder" => {
             pm.fire(HookPoint::BeforeBuild);
-            let prompt = build_agent_prompt(&agent, config)?;
-            let output = cli_backend::run_builder(&backend, model, &prompt, timeout)?;
             artifacts::write_artifact("status.md", &output)?;
             pm.fire(HookPoint::AfterBuild);
             scl_lifecycle::record_agent_step(&config.project_name, &agent.name, "builder", "completed");
@@ -343,8 +345,6 @@ fn run_single_step(
         }
         "evaluator" => {
             pm.fire(HookPoint::BeforeEvaluate);
-            let prompt = build_agent_prompt(&agent, config)?;
-            let output = cli_backend::run_oneshot(&backend, model, &prompt, timeout)?;
             artifacts::write_artifact("evaluation.md", &output)?;
             let fb_round = artifacts::next_feedback_number();
             artifacts::write_artifact(&format!("feedback/round-{fb_round:03}.md"), &output)?;
@@ -368,8 +368,6 @@ fn run_single_step(
             Ok(Some(verdict))
         }
         _ => {
-            let prompt = build_agent_prompt(&agent, config)?;
-            let output = cli_backend::run_oneshot(&backend, model, &prompt, timeout)?;
             let default_artifact = format!("agent-{}.md", agent.name);
             let artifact_name = step.output_artifact.as_deref()
                 .unwrap_or(&default_artifact);
@@ -378,6 +376,42 @@ fn run_single_step(
             println!("  Output written to .harness/{artifact_name}");
             Ok(None)
         }
+    }
+}
+
+/// Run an agent invocation, using streaming when a TUI channel is available.
+fn run_agent_invocation(
+    agent: &AgentDef,
+    backend: &Backend,
+    model: &str,
+    prompt: &str,
+    timeout: u64,
+    tui_tx: Option<&std::sync::mpsc::Sender<crate::tui::TuiEvent>>,
+) -> Result<String, String> {
+    if let Some(tx) = tui_tx {
+        let proc = if agent.role == "builder" {
+            cli_backend::run_builder_streaming(backend, model, prompt, timeout)?
+        } else {
+            cli_backend::run_oneshot_streaming(backend, model, prompt, timeout)?
+        };
+
+        let name = agent.name.clone();
+        loop {
+            match proc.lines.recv_timeout(std::time::Duration::from_millis(50)) {
+                Ok(line) => {
+                    let _ = tx.send(crate::tui::TuiEvent::AgentOutputLine(
+                        name.clone(), line,
+                    ));
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        proc.wait()
+    } else if agent.role == "builder" {
+        cli_backend::run_builder(backend, model, prompt, timeout)
+    } else {
+        cli_backend::run_oneshot(backend, model, prompt, timeout)
     }
 }
 
@@ -525,17 +559,22 @@ fn run_iterative_loop(
     backend_override: Option<&str>,
     config: &Config,
     pm: &PluginManager,
+    tui_tx: Option<&std::sync::mpsc::Sender<crate::tui::TuiEvent>>,
 ) -> Result<(), String> {
     for round in 1..=max_rounds {
+        if let Some(tx) = tui_tx {
+            let _ = tx.send(crate::tui::TuiEvent::PhaseChange(
+                crate::tui::TuiPhase::Loop { round, max: max_rounds },
+                round,
+            ));
+        }
         println!("\n  === Iteration {round}/{max_rounds} ===");
 
-        // Run body steps (builder(s) and any other steps)
         for step in body {
-            run_single_step(step, backend_override, config, pm)?;
+            run_single_step_streaming(step, backend_override, config, pm, tui_tx)?;
         }
 
-        // Run evaluator
-        let verdict = run_single_step(evaluator_step, backend_override, config, pm)?;
+        let verdict = run_single_step_streaming(evaluator_step, backend_override, config, pm, tui_tx)?;
 
         scl_lifecycle::record_loop_iteration(&config.project_name, round, max_rounds);
 

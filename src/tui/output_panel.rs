@@ -142,10 +142,12 @@ impl OutputPanel {
         }
     }
 
-    /// Return the number of known agents (for keybinding hints).
-    #[allow(dead_code)]
-    pub fn agent_count(&self) -> usize {
-        self.known_agents.len()
+    /// Get agent legend info for the status panel.
+    pub fn legend(&self) -> super::status_panel::AgentLegend {
+        super::status_panel::AgentLegend {
+            agents: self.known_agents.clone(),
+            filter: self.current_filter_label(),
+        }
     }
 
     pub fn scroll_up(&mut self, amount: usize) {

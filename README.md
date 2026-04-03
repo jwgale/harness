@@ -4,15 +4,15 @@ A CLI tool that orchestrates **planner -> builder -> evaluator** loops using sub
 
 Inspired by [Anthropic's harness architecture](https://www.anthropic.com/engineering/harness-design-long-running-apps) for long-running application development with Opus 4.6.
 
-## v0.7.0 Release Notes
+## v0.8.0 Release Notes
 
-Harness v0.7.0 adds real-time streaming output for parallel agents and per-agent TUI filtering.
+Harness v0.8.0 completes the multi-agent TUI with streaming for all steps and an on-screen agent legend.
 
-**New in v0.7.0:**
-- **Real-time Streaming** — parallel agents use streaming backends with live output in the TUI
-- **Per-Agent Output** — TUI output panel tags lines with `[agent-name]` and supports filter cycling (backtick key)
-- **Full Artifact Overrides** — `output_artifact` in workflow steps works correctly in both sequential and parallel modes
-- **26 Integration Tests** — including parallel artifact override test
+**New in v0.8.0:**
+- **Sequential Streaming** — all multi-agent steps (not just parallel) now stream live output to the TUI
+- **Agent Legend** — status panel shows color-coded agent list with filter key hints
+- **Multi-Agent Header** — status panel title switches to "Harness Multi-Agent" when agents are active
+- **Loop Phase Updates** — iterative loops send real-time `Loop {round}/{max}` phase events to TUI
 
 **v0.4.0:**
 - **Multi-Agent Orchestration** — `harness agent add/list/remove` for TOML-based agent definitions
@@ -774,7 +774,14 @@ Harness is evolving from a thin orchestrator into a full local-first agent platf
 - Full `output_artifact` override support in parallel mode
 - 26 integration tests
 
-**Phase 16: Agent Specialization + Cross-Project Learning**
+**Phase 16: Sequential Streaming + TUI Legend + Final Polish (done)**
+- Sequential multi-agent steps use streaming backends (matches parallel)
+- On-screen agent legend in status panel with color dots and key hints
+- "Harness Multi-Agent" title header when in agent/workflow mode
+- Iterative loops send real-time phase updates to TUI
+- 26 integration tests
+
+**Phase 17: Agent Specialization + Cross-Project Learning**
 - Agent specialization (frontend, backend, testing)
 - Cross-project learning via Shared Context Layer
 

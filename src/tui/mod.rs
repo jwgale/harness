@@ -342,6 +342,7 @@ fn tui_event_loop(
                     status_panel::render(
                         frame, chunks[0], project_name, &phase, round,
                         max_rounds, backend_name, elapsed, features, &scores,
+                        &output_panel.legend(),
                     );
                     output_panel.render(frame, chunks[1]);
                 }
@@ -352,6 +353,7 @@ fn tui_event_loop(
                     status_panel::render(
                         frame, area, project_name, &phase, round,
                         max_rounds, backend_name, elapsed, features, &scores,
+                        &output_panel.legend(),
                     );
                 }
             }

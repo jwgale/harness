@@ -7,6 +7,19 @@ use ratatui::Frame;
 use super::spec_parser::{Feature, FeatureStatus};
 use super::TuiPhase;
 
+/// Agent legend info for multi-agent TUI display.
+pub struct AgentLegend {
+    pub agents: Vec<String>,
+    pub filter: String,
+}
+
+impl AgentLegend {
+    #[allow(dead_code)]
+    pub fn empty() -> Self {
+        Self { agents: Vec::new(), filter: "All".to_string() }
+    }
+}
+
 pub struct EvalScores {
     pub functionality: Option<u32>,
     pub completeness: Option<u32>,
@@ -77,6 +90,7 @@ pub fn render(
     elapsed_secs: u64,
     features: &[Feature],
     scores: &EvalScores,
+    legend: &AgentLegend,
 ) {
     let mut lines: Vec<Line> = Vec::new();
 
@@ -141,6 +155,34 @@ pub fn render(
         _ => {}
     }
 
+    // Agent legend (multi-agent mode)
+    if !legend.agents.is_empty() {
+        let agent_colors = [
+            Color::LightCyan, Color::LightGreen, Color::LightYellow,
+            Color::LightMagenta, Color::LightBlue, Color::LightRed,
+        ];
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  \u{2500}\u{2500}\u{2500} Agents \u{2500}\u{2500}\u{2500}",
+            Style::default().fg(Color::DarkGray),
+        )));
+        for (i, name) in legend.agents.iter().enumerate() {
+            let color = agent_colors[i % agent_colors.len()];
+            let key_hint = if i < 4 { format!(" ({})", i + 4) } else { String::new() };
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled("\u{25cf} ", Style::default().fg(color)),
+                Span::styled(name.clone(), Style::default().fg(color)),
+                Span::styled(key_hint, Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+        lines.push(Line::from(vec![
+            Span::styled("  Filter: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&legend.filter, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled("  ` cycle", Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+
     // Features
     if !features.is_empty() {
         lines.push(Line::from(""));
@@ -202,8 +244,13 @@ pub fn render(
         }
     }
 
+    let title = if legend.agents.is_empty() {
+        " Harness Status ".to_string()
+    } else {
+        " Harness Multi-Agent ".to_string()
+    };
     let block = Block::default()
-        .title(" Harness Status ")
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
 
