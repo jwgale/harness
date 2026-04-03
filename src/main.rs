@@ -2,7 +2,9 @@ mod artifacts;
 mod cli_backend;
 mod commands;
 mod config;
+mod evaluator;
 mod global_config;
+mod notifications;
 mod plugins;
 mod prompts;
 mod scl;
@@ -93,6 +95,11 @@ enum Commands {
         #[command(subcommand)]
         action: ContextAction,
     },
+    /// Manage evaluator strategies
+    Evaluator {
+        #[command(subcommand)]
+        action: EvaluatorAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -164,6 +171,17 @@ enum WorkspaceAction {
 }
 
 #[derive(Subcommand)]
+enum EvaluatorAction {
+    /// List available evaluator strategies
+    List,
+    /// Set the evaluator strategy for this workspace
+    Use {
+        /// Strategy name: default, playwright-mcp, or curl
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum ContextAction {
     /// Show SCL connection status
     Status,
@@ -228,6 +246,10 @@ fn main() {
             ContextAction::Status => commands::context::status(),
             ContextAction::Query { query } => commands::context::query(&query),
             ContextAction::Record { kind, content } => commands::context::record(&kind, &content),
+        },
+        Commands::Evaluator { action } => match action {
+            EvaluatorAction::List => commands::evaluator_cmd::list(),
+            EvaluatorAction::Use { name } => commands::evaluator_cmd::use_strategy(&name),
         },
     };
 

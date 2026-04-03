@@ -14,12 +14,26 @@ pub fn record_build_complete(project: &str, round: u32) {
     auto_record("active_work", &format!("Build round {round} completed for {project}"));
 }
 
-/// Record evaluation results.
-pub fn record_eval_complete(project: &str, round: u32, verdict: &str, scores_summary: &str) {
+/// Record evaluation results (includes evaluator strategy if non-default).
+pub fn record_eval_complete(project: &str, round: u32, verdict: &str, strategy: &str) {
+    let strategy_note = if strategy.is_empty() || strategy == "default" {
+        String::new()
+    } else {
+        format!(" [strategy: {strategy}]")
+    };
     let content = format!(
-        "Evaluation round {round} for {project}: {verdict}. {scores_summary}"
+        "Evaluation round {round} for {project}: {verdict}{strategy_note}"
     );
     auto_record("active_work", &content);
+}
+
+/// Record a notification event.
+pub fn record_notification(plugin: &str, strategy: &str, event: &str, success: bool) {
+    let status = if success { "sent" } else { "failed" };
+    let content = format!(
+        "Notification {status}: plugin={plugin}, strategy={strategy}, event={event}"
+    );
+    auto_record("insight", &content);
 }
 
 fn auto_record(entry_type: &str, content: &str) {

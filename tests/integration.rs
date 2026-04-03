@@ -231,3 +231,98 @@ fn test_reset_generates_handoff() {
 
     fs::remove_dir_all(&tmp).ok();
 }
+
+#[test]
+fn test_evaluator_list() {
+    let (stdout, _, ok) = run_harness(&["evaluator", "list"]);
+    assert!(ok);
+    assert!(stdout.contains("default"));
+    assert!(stdout.contains("playwright-mcp"));
+    assert!(stdout.contains("curl"));
+}
+
+#[test]
+fn test_evaluator_use() {
+    let tmp = tempdir("evaluse");
+    run_harness_in(&tmp, &["init", "Evaluator test"]);
+
+    // Set to curl
+    let (stdout, _, ok) = run_harness_in(&tmp, &["evaluator", "use", "curl"]);
+    assert!(ok, "evaluator use failed: {stdout}");
+    assert!(stdout.contains("curl"));
+
+    // Verify config was updated
+    let config_str = fs::read_to_string(tmp.join(".harness/config.json")).unwrap();
+    assert!(config_str.contains("curl"));
+
+    // Set to invalid strategy
+    let (_, stderr, ok) = run_harness_in(&tmp, &["evaluator", "use", "bogus"]);
+    assert!(!ok);
+    assert!(stderr.contains("Unknown strategy"));
+
+    fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn test_evaluator_strategy_in_config() {
+    let tmp = tempdir("evalcfg");
+    run_harness_in(&tmp, &["init", "Strategy config test"]);
+
+    // Default config should have evaluator_strategy = "default"
+    let config_str = fs::read_to_string(tmp.join(".harness/config.json")).unwrap();
+    assert!(config_str.contains("evaluator_strategy"));
+    assert!(config_str.contains("default"));
+
+    fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn test_mock_evaluate_with_strategy() {
+    let tmp = tempdir("evalstrat");
+    run_harness_in(&tmp, &["init", "Mock eval strategy test"]);
+
+    // Plan first (needed before evaluate)
+    run_harness_in(&tmp, &["plan", "--backend", "mock"]);
+
+    // Evaluate with default strategy
+    let (stdout, _, ok) = run_harness_in(&tmp, &["evaluate", "--backend", "mock"]);
+    assert!(ok, "evaluate failed: {stdout}");
+    assert!(stdout.contains("Verdict:"));
+    assert!(stdout.contains("strategy: default"));
+
+    // Switch to curl and evaluate again
+    run_harness_in(&tmp, &["evaluator", "use", "curl"]);
+    let (stdout, _, ok) = run_harness_in(&tmp, &["evaluate", "--backend", "mock"]);
+    assert!(ok, "curl evaluate failed: {stdout}");
+    assert!(stdout.contains("strategy: curl"));
+
+    fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn test_notification_plugin_discovery() {
+    let plugins_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp/.config"))
+        .join("harness/plugins");
+    fs::create_dir_all(&plugins_dir).unwrap();
+
+    // Create a notification plugin
+    let plugin_content = r#"
+name = "test-notify"
+description = "Test notification plugin"
+
+[notifications]
+strategy = "webhook"
+url = "http://localhost:9999/test"
+events = ["on_eval_pass"]
+"#;
+    let plugin_file = plugins_dir.join("test-notify.toml");
+    fs::write(&plugin_file, plugin_content).unwrap();
+
+    // Plugin list should still work (notifications are separate from hooks)
+    let (stdout, _, ok) = run_harness(&["plugin", "list"]);
+    assert!(ok, "plugin list failed after adding notification plugin: {stdout}");
+
+    // Cleanup
+    fs::remove_file(&plugin_file).ok();
+}

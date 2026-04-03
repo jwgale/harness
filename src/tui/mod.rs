@@ -18,6 +18,8 @@ use crate::artifacts;
 use crate::cli_backend::{self, Backend, StreamingProcess};
 use crate::commands::evaluate;
 use crate::config::Config;
+use crate::evaluator;
+use crate::notifications;
 use crate::plugins::{PluginManager, HookPoint};
 use crate::scl_lifecycle;
 use crate::prompts;
@@ -100,6 +102,7 @@ pub fn run_with_tui(
     let config_clone_eval_timeout = config.evaluator_timeout_seconds;
     let model_clone = model.clone();
     let project_clone = project_name.clone();
+    let eval_strategy = config.evaluator_strategy.clone();
     std::thread::spawn(move || {
         let result = run_loop(
             &backend,
@@ -109,6 +112,7 @@ pub fn run_with_tui(
             config_clone_eval_timeout,
             &tx_clone,
             &project_clone,
+            &eval_strategy,
         );
         let _ = tx_clone.send(TuiEvent::RunFinished(result));
     });
@@ -139,6 +143,7 @@ pub fn run_with_tui(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_loop(
     backend: &Backend,
     model: &str,
@@ -147,6 +152,7 @@ fn run_loop(
     eval_timeout: u64,
     tx: &mpsc::Sender<TuiEvent>,
     project_name: &str,
+    eval_strategy: &str,
 ) -> Result<String, String> {
     // Create a channel that routes plugin hook output into the TUI output panel
     let hook_tx = tx.clone();
@@ -190,7 +196,15 @@ fn run_loop(
         // Evaluate
         let _ = tx.send(TuiEvent::PhaseChange(TuiPhase::Evaluate, round));
         pm.fire(HookPoint::BeforeEvaluate);
-        let prompt = prompts::evaluator_prompt()?;
+
+        // Build evaluator prompt with optional strategy prefix
+        let base_prompt = prompts::evaluator_prompt()?;
+        let prefix = evaluator::streaming_prefix_for(eval_strategy)?;
+        let prompt = match prefix {
+            Some(pfx) => format!("{pfx}{base_prompt}"),
+            None => base_prompt,
+        };
+
         let proc = cli_backend::run_oneshot_streaming(backend, model, &prompt, eval_timeout)?;
         let eval_output = drain_streaming(proc, tx)?;
 
@@ -201,7 +215,8 @@ fn run_loop(
         let verdict = evaluate::parse_verdict(&eval_output);
         let scores = EvalScores::parse(&eval_output);
         pm.fire(HookPoint::AfterEvaluate);
-        scl_lifecycle::record_eval_complete(project_name, round, &format!("{verdict:?}"), "");
+        scl_lifecycle::record_eval_complete(project_name, round, &format!("{verdict:?}"), eval_strategy);
+        notifications::fire_eval_event(&verdict, project_name, round);
         let _ = tx.send(TuiEvent::EvalResult(scores, verdict.clone()));
         let _ = tx.send(TuiEvent::PhaseComplete);
 

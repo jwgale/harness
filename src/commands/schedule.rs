@@ -3,6 +3,7 @@ use std::fs;
 use std::io::Write;
 use std::process::Command;
 
+use crate::notifications;
 use crate::xdg;
 
 const HISTORY_RETENTION_DAYS: i64 = 60;
@@ -178,6 +179,7 @@ pub fn run_now(name: &str) -> Result<(), String> {
             // Update state and record history
             mark_run(name);
             record_history(name, cmd, exit_code, duration_ms);
+            notifications::fire_schedule_complete(name, output.status.success());
         }
         Err(e) => {
             println!("Failed to execute: {e}");

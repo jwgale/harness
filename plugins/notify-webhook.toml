@@ -1,0 +1,11 @@
+# Example: Generic webhook notification plugin
+# Copy to ~/.config/harness/plugins/ and set your webhook URL
+name = "notify-webhook"
+description = "POST JSON to a webhook on harness events"
+version = "0.1.0"
+
+[notifications]
+strategy = "webhook"
+url = "https://your-server.com/harness-webhook"
+# events = ["on_eval_pass", "on_eval_fail", "on_eval_revise", "on_schedule_complete"]
+# Omit events to fire on all events

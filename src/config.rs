@@ -11,6 +11,13 @@ pub struct Config {
     pub builder_timeout_seconds: u64,
     pub evaluator_timeout_seconds: u64,
     pub created_at: String,
+    /// Evaluator strategy: "default", "playwright-mcp", or "curl"
+    #[serde(default = "default_evaluator_strategy")]
+    pub evaluator_strategy: String,
+}
+
+fn default_evaluator_strategy() -> String {
+    "default".to_string()
 }
 
 impl Config {
@@ -23,6 +30,7 @@ impl Config {
             builder_timeout_seconds: 1800,
             evaluator_timeout_seconds: 600,
             created_at: chrono::Utc::now().to_rfc3339(),
+            evaluator_strategy: "default".to_string(),
         }
     }
 

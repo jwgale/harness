@@ -8,6 +8,7 @@ use std::time::Duration;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 
 use crate::commands::schedule;
+use crate::notifications;
 use crate::plugins::{HookPoint, PluginManager};
 use crate::xdg;
 
@@ -409,10 +410,12 @@ fn run_due_schedules(now: &chrono::DateTime<chrono::Local>, now_minute: i64) {
                     eprintln!("[schedule:{name}] exited with {}", output.status);
                 }
                 schedule::record_history(name, cmd, exit_code, duration_ms);
+                notifications::fire_schedule_complete(name, output.status.success());
             }
             Err(e) => {
                 eprintln!("[schedule:{name}] failed to execute: {e}");
                 schedule::record_history(name, cmd, -1, duration_ms);
+                notifications::fire_schedule_complete(name, false);
             }
         }
     }

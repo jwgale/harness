@@ -1,8 +1,9 @@
 use crate::artifacts;
-use crate::cli_backend::{self, Backend};
+use crate::cli_backend::Backend;
 use crate::config::Config;
+use crate::evaluator;
+use crate::notifications;
 use crate::plugins::{PluginManager, HookPoint};
-use crate::prompts;
 use crate::scl_lifecycle;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -23,9 +24,8 @@ pub fn run(backend_override: Option<&str>) -> Result<Verdict, String> {
     }
 
     pm.fire(HookPoint::BeforeEvaluate);
-    println!("Running evaluator...");
-    let prompt = prompts::evaluator_prompt()?;
-    let output = cli_backend::run_oneshot(&backend, &config.model, &prompt, config.evaluator_timeout_seconds)?;
+    println!("Running evaluator (strategy: {})...", config.evaluator_strategy);
+    let output = evaluator::run_strategy(&config, &backend)?;
 
     // Save evaluation
     artifacts::write_artifact("evaluation.md", &output)?;
@@ -37,7 +37,14 @@ pub fn run(backend_override: Option<&str>) -> Result<Verdict, String> {
     // Parse verdict
     let verdict = parse_verdict(&output);
     pm.fire(HookPoint::AfterEvaluate);
-    scl_lifecycle::record_eval_complete(&config.project_name, round, &format!("{verdict:?}"), "");
+    scl_lifecycle::record_eval_complete(
+        &config.project_name, round,
+        &format!("{verdict:?}"), &config.evaluator_strategy,
+    );
+
+    // Fire notification events
+    notifications::fire_eval_event(&verdict, &config.project_name, round);
+
     println!("Evaluation written to .harness/evaluation.md");
     println!("Verdict: {verdict:?}");
 

@@ -1,0 +1,12 @@
+# Example: Email notification plugin
+# Copy to ~/.config/harness/plugins/ and configure addresses
+# Requires `mail` command to be available on the system
+name = "notify-email"
+description = "Email notifications on harness events"
+version = "0.1.0"
+
+[notifications]
+strategy = "email"
+to = "you@example.com"
+from = "harness@localhost"
+events = ["on_eval_fail", "on_schedule_complete"]

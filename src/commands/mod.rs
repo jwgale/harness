@@ -10,3 +10,4 @@ pub mod daemon;
 pub mod workspace;
 pub mod schedule;
 pub mod context;
+pub mod evaluator_cmd;

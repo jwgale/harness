@@ -1,0 +1,11 @@
+# Example: Telegram notification plugin
+# Copy to ~/.config/harness/plugins/ and configure your bot
+name = "notify-telegram"
+description = "Send Telegram messages on harness events"
+version = "0.1.0"
+
+[notifications]
+strategy = "telegram"
+bot_token = "YOUR_BOT_TOKEN"
+chat_id = "YOUR_CHAT_ID"
+events = ["on_eval_pass", "on_eval_fail"]

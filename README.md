@@ -4,10 +4,17 @@ A CLI tool that orchestrates **planner -> builder -> evaluator** loops using sub
 
 Inspired by [Anthropic's harness architecture](https://www.anthropic.com/engineering/harness-design-long-running-apps) for long-running application development with Opus 4.6.
 
-## v0.2.0 Release Notes
+## v0.3.0 Release Notes
 
-Harness v0.2.0 is the first production-ready release, built across 8 development phases:
+Harness v0.3.0 adds pluggable evaluator strategies and external notification integrations.
 
+**New in v0.3.0:**
+- **Custom Evaluators** — `harness evaluator list/use` to switch between evaluation strategies per workspace
+- **Built-in Strategies** — `default` (prompt-based), `playwright-mcp` (browser interaction), `curl` (HTTP health checks)
+- **External Notifications** — Slack, Telegram, email, and webhook notification plugins that fire on eval pass/fail and schedule completion
+- **15 Integration Tests** — expanded test suite covering evaluator and notification features
+
+**v0.2.0 foundation:**
 - **Core Orchestrator** — plan -> build -> evaluate -> revise loop with TUI, prompt overrides, streaming output, and verdict parsing
 - **Local Install** — one-liner `curl` installer, XDG-compliant directory layout, `cargo install --path .`
 - **Persistent Daemon** — systemd user service with `harness daemon start/stop/status/logs`
@@ -16,7 +23,6 @@ Harness v0.2.0 is the first production-ready release, built across 8 development
 - **Scheduled Tasks** — cron-style scheduling with deduplication, local timezone, execution history, manual triggers
 - **Shared Context Layer** — built-in MCP integration with direct HTTP client (0.1s queries), auto-recording of lifecycle events
 - **Mock Backend** — `--backend mock` for instant testing without real Claude/Codex
-- **Integration Tests** — 10+ tests running in under 1 second
 
 ## Installation
 
@@ -93,6 +99,8 @@ harness evaluate --backend claude
 | `harness context status` | Show SCL connection status |
 | `harness context query "<text>"` | Query the Shared Context Layer |
 | `harness context record <type> "<text>"` | Record an entry to SCL |
+| `harness evaluator list` | List available evaluator strategies |
+| `harness evaluator use <name>` | Set evaluator strategy for this workspace |
 
 ### `harness run` options
 
@@ -337,6 +345,107 @@ auto_record = true    # record plan/build/evaluate events automatically
 
 Set `enabled = false` to disable SCL integration entirely. If the SCL server is unreachable, harness silently falls back to running without it. Health checks are cached for 60 seconds.
 
+## Custom Evaluators
+
+Harness supports pluggable evaluator strategies that change how your build is assessed.
+
+### Available Strategies
+
+| Strategy | Description |
+|----------|-------------|
+| `default` | Prompt-based evaluation via CLI backend (Claude/Codex/mock) |
+| `playwright-mcp` | Uses Playwright MCP to interact with the running app in a browser |
+| `curl` | Simple HTTP health-check evaluation for APIs |
+
+### Usage
+
+```bash
+# List available strategies
+harness evaluator list
+
+# Set strategy for this workspace
+harness evaluator use playwright-mcp
+
+# Run evaluation (uses configured strategy)
+harness evaluate --backend claude
+```
+
+The strategy is stored in `.harness/config.json` and respected by both `harness evaluate` and `harness run`.
+
+### Playwright MCP Strategy
+
+When set, the evaluator is instructed to use the Playwright MCP tool to:
+1. Launch and navigate to your running application
+2. Interact with the UI (click buttons, fill forms, navigate)
+3. Verify core user flows end-to-end
+4. Take screenshots of failures
+
+Falls back to code inspection if the app isn't a web application.
+
+### Curl Strategy
+
+Checks HTTP endpoints before running the prompt-based evaluation. Configure endpoints in `.harness/endpoints.json`:
+
+```json
+["http://localhost:3000", "http://localhost:3000/api/health", "http://localhost:3000/api/status"]
+```
+
+Health check results (2xx = OK, other = FAILED, timeout = UNREACHABLE) are prepended to the evaluator prompt so the LLM can factor them into scoring.
+
+## External Notifications
+
+Notification plugins fire on evaluator and schedule lifecycle events. They use the same plugin directory (`~/.config/harness/plugins/`) as regular plugins.
+
+### Notification Events
+
+| Event | Fires when |
+|-------|-----------|
+| `on_eval_pass` | Evaluator returns PASS verdict |
+| `on_eval_fail` | Evaluator returns FAIL verdict |
+| `on_eval_revise` | Evaluator returns REVISE verdict |
+| `on_schedule_complete` | A scheduled task finishes (success or failure) |
+
+### Strategies
+
+**Slack** — POST to an incoming webhook:
+```toml
+# ~/.config/harness/plugins/notify-slack.toml
+name = "notify-slack"
+description = "Slack notifications"
+
+[notifications]
+strategy = "slack"
+url = "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+events = ["on_eval_pass", "on_eval_fail"]
+```
+
+**Telegram** — Send via Bot API:
+```toml
+[notifications]
+strategy = "telegram"
+bot_token = "YOUR_BOT_TOKEN"
+chat_id = "YOUR_CHAT_ID"
+```
+
+**Email** — Send via local `mail` command:
+```toml
+[notifications]
+strategy = "email"
+to = "you@example.com"
+from = "harness@localhost"
+```
+
+**Webhook** — POST JSON to any URL:
+```toml
+[notifications]
+strategy = "webhook"
+url = "https://your-server.com/harness-webhook"
+```
+
+Omit the `events` array to fire on all events. Notification plugins can coexist with regular hook plugins in the same TOML file.
+
+Example notification plugin templates are in the `plugins/` directory of this repo.
+
 ## Configuration
 
 ### Global Config
@@ -361,6 +470,7 @@ url = "http://127.0.0.1:3100/mcp"
   "max_eval_rounds": 3,
   "builder_timeout_seconds": 1800,
   "evaluator_timeout_seconds": 600,
+  "evaluator_strategy": "default",
   "created_at": "2026-04-01T12:00:00Z"
 }
 ```
@@ -423,9 +533,12 @@ Harness is evolving from a thin orchestrator into a full local-first agent platf
 - Automatic lifecycle recording (plan/build/evaluate events)
 - `auto_record` config toggle
 
-**Phase 11: Custom Evaluators + External Integrations**
-- Custom evaluator strategies (Playwright MCP, curl, etc.)
-- Notification hooks (Slack, email, webhooks)
+**Phase 11: Custom Evaluators + External Integrations (done)**
+- `harness evaluator list/use` for pluggable evaluator strategies
+- Built-in strategies: default, playwright-mcp, curl
+- Notification plugins: Slack, Telegram, email, webhook
+- Notification events: on_eval_pass, on_eval_fail, on_eval_revise, on_schedule_complete
+- SCL auto-records evaluator strategy and notification events
 
 **Phase 12: Multi-Agent Orchestration**
 - Parallel builder sessions

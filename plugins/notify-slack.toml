@@ -1,0 +1,10 @@
+# Example: Slack notification plugin
+# Copy to ~/.config/harness/plugins/ and set your webhook URL
+name = "notify-slack"
+description = "Send Slack notifications on eval pass/fail"
+version = "0.1.0"
+
+[notifications]
+strategy = "slack"
+url = "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+events = ["on_eval_pass", "on_eval_fail", "on_schedule_complete"]
