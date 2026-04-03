@@ -175,6 +175,42 @@ impl StreamingProcess {
 
 }
 
+/// Spawn a command with no stdin (prompt passed as arg) and stream stdout line-by-line.
+fn spawn_streaming_no_stdin(mut cmd: Command, timeout_secs: u64) -> Result<StreamingProcess, String> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn process: {e}"))?;
+
+    let stdout = child.stdout.take()
+        .ok_or_else(|| "Failed to capture stdout".to_string())?;
+
+    let (tx, rx) = mpsc::channel();
+    let reader_thread = std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        let mut all_lines = Vec::new();
+        for line in reader.lines() {
+            match line {
+                Ok(l) => {
+                    all_lines.push(l.clone());
+                    let _ = tx.send(l);
+                }
+                Err(_) => break,
+            }
+        }
+        all_lines
+    });
+
+    Ok(StreamingProcess {
+        lines: rx,
+        child,
+        reader_thread: Some(reader_thread),
+        timeout_secs,
+    })
+}
+
 /// Spawn a command and stream its stdout line-by-line.
 fn spawn_streaming(mut cmd: Command, prompt: &str, timeout_secs: u64) -> Result<StreamingProcess, String> {
     let mut child = cmd
@@ -219,36 +255,34 @@ fn spawn_streaming(mut cmd: Command, prompt: &str, timeout_secs: u64) -> Result<
 
 /// Streaming variant of run_oneshot.
 pub fn run_oneshot_streaming(backend: &Backend, model: &str, prompt: &str, timeout_secs: u64) -> Result<StreamingProcess, String> {
-    let cmd = match backend {
+    match backend {
         Backend::Claude => {
-            let mut c = Command::new("claude");
-            c.args(["--print", "--permission-mode", "bypassPermissions", "--model", model, "-p"]);
-            c
+            let mut cmd = Command::new("claude");
+            cmd.args(["--print", "--permission-mode", "bypassPermissions", "--model", model, "-p", prompt]);
+            spawn_streaming_no_stdin(cmd, timeout_secs)
         }
         Backend::Codex => {
-            let mut c = Command::new("codex");
-            c.args(["exec", "-q"]);
-            c
+            let mut cmd = Command::new("codex");
+            cmd.args(["exec", "-q"]);
+            spawn_streaming(cmd, prompt, timeout_secs)
         }
-    };
-    spawn_streaming(cmd, prompt, timeout_secs)
+    }
 }
 
 /// Streaming variant of run_builder.
 pub fn run_builder_streaming(backend: &Backend, model: &str, prompt: &str, timeout_secs: u64) -> Result<StreamingProcess, String> {
-    let cmd = match backend {
+    match backend {
         Backend::Claude => {
-            let mut c = Command::new("claude");
-            c.args(["--print", "--permission-mode", "bypassPermissions", "--model", model, "-p"]);
-            c
+            let mut cmd = Command::new("claude");
+            cmd.args(["--print", "--permission-mode", "bypassPermissions", "--model", model, "-p", prompt]);
+            spawn_streaming_no_stdin(cmd, timeout_secs)
         }
         Backend::Codex => {
-            let mut c = Command::new("codex");
-            c.args(["exec", "-q", "--full-auto"]);
-            c
+            let mut cmd = Command::new("codex");
+            cmd.args(["exec", "-q", "--full-auto"]);
+            spawn_streaming(cmd, prompt, timeout_secs)
         }
-    };
-    spawn_streaming(cmd, prompt, timeout_secs)
+    }
 }
 
 fn wait_with_timeout(child: &mut std::process::Child, timeout_secs: u64) -> Result<std::process::Output, String> {

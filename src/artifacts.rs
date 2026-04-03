@@ -18,7 +18,7 @@ pub fn init_harness_dir() -> Result<(), String> {
     if dir.exists() {
         return Err(".harness/ already exists. Remove it first or use a different directory.".to_string());
     }
-    for sub in &["feedback", "runs"] {
+    for sub in &["feedback", "runs", "prompts"] {
         fs::create_dir_all(dir.join(sub))
             .map_err(|e| format!("Failed to create .harness/{sub}: {e}"))?;
     }
