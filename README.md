@@ -4,15 +4,22 @@ A CLI tool that orchestrates **planner -> builder -> evaluator** loops using sub
 
 Inspired by [Anthropic's harness architecture](https://www.anthropic.com/engineering/harness-design-long-running-apps) for long-running application development with Opus 4.6.
 
-## v0.3.0 Release Notes
+## v0.4.0 Release Notes
 
-Harness v0.3.0 adds pluggable evaluator strategies and external notification integrations.
+Harness v0.4.0 adds multi-agent orchestration — define agents, compose workflows, and run them sequentially.
 
-**New in v0.3.0:**
+**New in v0.4.0:**
+- **Multi-Agent Orchestration** — `harness agent add/list/remove` for TOML-based agent definitions
+- **Named Workflows** — `harness run --workflow <name>` runs TOML-defined agent sequences
+- **Agent CLI** — `harness run --agents planner,builder,evaluator` for ad-hoc multi-agent runs
+- **Custom Roles** — define specialized agents (security reviewer, documentation writer, etc.)
+- **SCL Recording** — all agent runs, steps, and outcomes automatically recorded
+- **20 Integration Tests** — comprehensive test suite
+
+**v0.3.0:**
 - **Custom Evaluators** — `harness evaluator list/use` to switch between evaluation strategies per workspace
 - **Built-in Strategies** — `default` (prompt-based), `playwright-mcp` (browser interaction), `curl` (HTTP health checks)
 - **External Notifications** — Slack, Telegram, email, and webhook notification plugins that fire on eval pass/fail and schedule completion
-- **15 Integration Tests** — expanded test suite covering evaluator and notification features
 
 **v0.2.0 foundation:**
 - **Core Orchestrator** — plan -> build -> evaluate -> revise loop with TUI, prompt overrides, streaming output, and verdict parsing
@@ -101,6 +108,9 @@ harness evaluate --backend claude
 | `harness context record <type> "<text>"` | Record an entry to SCL |
 | `harness evaluator list` | List available evaluator strategies |
 | `harness evaluator use <name>` | Set evaluator strategy for this workspace |
+| `harness agent list` | List defined agents |
+| `harness agent add <name> --role <role> --backend <backend>` | Create a new agent definition |
+| `harness agent remove <name>` | Remove an agent definition |
 
 ### `harness run` options
 
@@ -109,6 +119,8 @@ harness evaluate --backend claude
 - `--pause-after-plan` — pause for human review after planning
 - `--pause-after-eval` — pause for human review after each evaluation
 - `--no-tui` — disable TUI, use plain text output
+- `--agents planner,builder,evaluator` — run named agents sequentially (multi-agent mode)
+- `--workflow <name>` — run a named workflow from `~/.config/harness/workflows/`
 
 ## How the Loop Works
 
@@ -446,6 +458,105 @@ Omit the `events` array to fire on all events. Notification plugins can coexist 
 
 Example notification plugin templates are in the `plugins/` directory of this repo.
 
+## Multi-Agent Orchestration
+
+Define named agents and compose them into workflows for flexible multi-agent runs.
+
+### Defining Agents
+
+Agents are TOML files in `~/.config/harness/agents/`:
+
+```toml
+# ~/.config/harness/agents/my-planner.toml
+name = "my-planner"
+role = "planner"
+backend = "claude"
+description = "Plans the build from the project goal"
+# model = "claude-opus-4-6"    # optional model override
+# timeout_seconds = 600        # optional timeout
+# prompt_template = "..."      # inline prompt or file path
+# tools = ["git", "grep"]      # optional tool list
+```
+
+Valid roles: `planner`, `builder`, `evaluator`, `custom`.
+
+```bash
+# Create agents via CLI
+harness agent add my-planner --role planner --backend claude
+harness agent add my-builder --role builder --backend claude
+harness agent add my-evaluator --role evaluator --backend claude
+
+# List defined agents
+harness agent list
+
+# Remove an agent
+harness agent remove my-planner
+```
+
+### Running with Named Agents
+
+Use `--agents` to run a comma-separated list of agents sequentially:
+
+```bash
+harness run --agents my-planner,my-builder,my-evaluator --no-tui
+```
+
+Each agent runs in order. Planner agents write `spec.md`, builders write `status.md`, evaluators write `evaluation.md` and return a verdict. Custom agents write their output to `.harness/agent-<name>.md`.
+
+### Defining Workflows
+
+Workflows are TOML files in `~/.config/harness/workflows/` that define a sequence of agent steps:
+
+```toml
+# ~/.config/harness/workflows/standard.toml
+name = "standard"
+description = "Standard plan-build-evaluate workflow"
+max_rounds = 3
+
+[[steps]]
+agent = "my-planner"
+
+[[steps]]
+agent = "my-builder"
+
+[[steps]]
+agent = "my-evaluator"
+```
+
+Run a workflow:
+```bash
+harness run --workflow standard
+```
+
+Steps can override prompts:
+```toml
+[[steps]]
+agent = "my-evaluator"
+prompt = "Focus only on security issues in this evaluation."
+```
+
+### Custom Agents
+
+Create agents with the `custom` role for specialized tasks (security review, documentation, etc.):
+
+```toml
+name = "security-reviewer"
+role = "custom"
+backend = "claude"
+prompt_template = "Review the codebase for OWASP Top 10 vulnerabilities..."
+```
+
+Custom agents receive the project goal and spec as context, plus any custom prompt template you provide.
+
+### SCL Integration
+
+Multi-agent runs automatically record to the Shared Context Layer:
+- Which agents were used in each run
+- Each agent step completion with status
+- Final run outcome
+
+Example agent and workflow templates are in the `examples/` directory of this repo.
+
 ## Configuration
 
 ### Global Config
@@ -540,7 +651,16 @@ Harness is evolving from a thin orchestrator into a full local-first agent platf
 - Notification events: on_eval_pass, on_eval_fail, on_eval_revise, on_schedule_complete
 - SCL auto-records evaluator strategy and notification events
 
-**Phase 12: Multi-Agent Orchestration**
+**Phase 12: Multi-Agent Orchestration (done)**
+- `harness agent add/list/remove` for TOML-based agent definitions
+- Agent roles: planner, builder, evaluator, custom
+- `harness run --agents planner,builder,evaluator` for sequential multi-agent runs
+- `harness run --workflow <name>` for TOML-defined workflow execution
+- Workflow steps with optional prompt overrides
+- SCL auto-records agent runs, individual steps, and outcomes
+- 20 integration tests passing
+
+**Phase 13: Parallel Execution + Agent Specialization**
 - Parallel builder sessions
 - Agent specialization (frontend, backend, testing)
 - Cross-project learning via Shared Context Layer

@@ -36,6 +36,29 @@ pub fn record_notification(plugin: &str, strategy: &str, event: &str, success: b
     auto_record("insight", &content);
 }
 
+/// Record start of a multi-agent run.
+pub fn record_agent_run_start(project: &str, agents: &[&str]) {
+    let names = agents.join(", ");
+    auto_record("active_work", &format!(
+        "Multi-agent run started for {project} — agents: [{names}]"
+    ));
+}
+
+/// Record completion of an individual agent step.
+pub fn record_agent_step(project: &str, agent: &str, role: &str, status: &str) {
+    auto_record("active_work", &format!(
+        "Agent '{agent}' ({role}) {status} for {project}"
+    ));
+}
+
+/// Record end of a multi-agent run.
+pub fn record_agent_run_end(project: &str, agents: &[&str], outcome: &str) {
+    let names = agents.join(", ");
+    auto_record("active_work", &format!(
+        "Multi-agent run {outcome} for {project} — agents: [{names}]"
+    ));
+}
+
 fn auto_record(entry_type: &str, content: &str) {
     let gc = GlobalConfig::load();
     let Some(scl_cfg) = gc.scl() else { return };
@@ -51,5 +74,14 @@ fn auto_record(entry_type: &str, content: &str) {
 }
 
 fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max { s } else { &s[..max] }
+    if s.len() <= max {
+        s
+    } else {
+        // Find a valid char boundary at or before max
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        &s[..end]
+    }
 }

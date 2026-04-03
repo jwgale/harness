@@ -27,9 +27,19 @@ pub fn plugins_dir() -> PathBuf {
     config_dir().join("plugins")
 }
 
+/// Agents directory: ~/.config/harness/agents/
+pub fn agents_dir() -> PathBuf {
+    config_dir().join("agents")
+}
+
+/// Workflows directory: ~/.config/harness/workflows/
+pub fn workflows_dir() -> PathBuf {
+    config_dir().join("workflows")
+}
+
 /// Ensure all XDG directories exist.
 pub fn ensure_dirs() -> Result<(), String> {
-    for dir in &[config_dir(), data_dir(), cache_dir(), plugins_dir()] {
+    for dir in &[config_dir(), data_dir(), cache_dir(), plugins_dir(), agents_dir(), workflows_dir()] {
         fs::create_dir_all(dir)
             .map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
     }

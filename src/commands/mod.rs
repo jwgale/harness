@@ -11,3 +11,4 @@ pub mod workspace;
 pub mod schedule;
 pub mod context;
 pub mod evaluator_cmd;
+pub mod agent_cmd;

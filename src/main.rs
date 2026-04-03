@@ -1,3 +1,4 @@
+mod agents;
 mod artifacts;
 mod cli_backend;
 mod commands;
@@ -10,6 +11,7 @@ mod prompts;
 mod scl;
 mod scl_lifecycle;
 mod tui;
+mod workflows;
 mod xdg;
 
 use clap::{Parser, Subcommand};
@@ -63,6 +65,12 @@ enum Commands {
         /// Disable TUI and use plain text output
         #[arg(long)]
         no_tui: bool,
+        /// Comma-separated agent names to run sequentially (e.g. "planner,builder,evaluator")
+        #[arg(long)]
+        agents: Option<String>,
+        /// Named workflow to run (from ~/.config/harness/workflows/)
+        #[arg(long)]
+        workflow: Option<String>,
     },
     /// Print current harness state from artifacts
     Status,
@@ -99,6 +107,11 @@ enum Commands {
     Evaluator {
         #[command(subcommand)]
         action: EvaluatorAction,
+    },
+    /// Manage agent definitions
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
     },
 }
 
@@ -171,6 +184,31 @@ enum WorkspaceAction {
 }
 
 #[derive(Subcommand)]
+enum AgentAction {
+    /// List all defined agents
+    List,
+    /// Add a new agent definition
+    Add {
+        /// Agent name
+        name: String,
+        /// Role: planner, builder, evaluator, or custom
+        #[arg(long)]
+        role: String,
+        /// Backend: claude, codex, or mock
+        #[arg(long)]
+        backend: String,
+        /// Optional description
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Remove an agent definition
+    Remove {
+        /// Agent name
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum EvaluatorAction {
     /// List available evaluator strategies
     List,
@@ -216,7 +254,20 @@ fn main() {
             pause_after_plan,
             pause_after_eval,
             no_tui,
-        } => commands::run::run(backend.as_deref(), max_rounds, pause_after_plan, pause_after_eval, no_tui),
+            agents,
+            workflow,
+        } => {
+            if agents.is_some() || workflow.is_some() {
+                commands::run::run_multi_agent(
+                    backend.as_deref(),
+                    max_rounds,
+                    agents.as_deref(),
+                    workflow.as_deref(),
+                )
+            } else {
+                commands::run::run(backend.as_deref(), max_rounds, pause_after_plan, pause_after_eval, no_tui)
+            }
+        }
         Commands::Status => commands::status::run(),
         Commands::Reset => commands::reset::run(),
         Commands::Feedback => commands::feedback::run(),
@@ -250,6 +301,13 @@ fn main() {
         Commands::Evaluator { action } => match action {
             EvaluatorAction::List => commands::evaluator_cmd::list(),
             EvaluatorAction::Use { name } => commands::evaluator_cmd::use_strategy(&name),
+        },
+        Commands::Agent { action } => match action {
+            AgentAction::List => commands::agent_cmd::list(),
+            AgentAction::Add { name, role, backend, description } => {
+                commands::agent_cmd::add(&name, &role, &backend, description.as_deref())
+            }
+            AgentAction::Remove { name } => commands::agent_cmd::remove(&name),
         },
     };
 

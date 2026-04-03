@@ -201,7 +201,15 @@ pub fn auto_record(url: &str, kind: &str, content: &str) {
 }
 
 fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max { s } else { &s[..max] }
+    if s.len() <= max {
+        s
+    } else {
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        &s[..end]
+    }
 }
 
 /// Path to the last-recorded event file (for status display).

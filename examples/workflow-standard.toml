@@ -1,0 +1,14 @@
+# Example workflow: standard plan → build → evaluate
+# Copy to ~/.config/harness/workflows/
+name = "standard"
+description = "Standard plan-build-evaluate workflow"
+max_rounds = 3
+
+[[steps]]
+agent = "my-planner"
+
+[[steps]]
+agent = "my-builder"
+
+[[steps]]
+agent = "my-evaluator"

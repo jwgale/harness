@@ -1,0 +1,9 @@
+# Example planner agent definition
+# Copy to ~/.config/harness/agents/
+name = "my-planner"
+role = "planner"
+backend = "claude"
+description = "Plans the build from the project goal"
+# model = "claude-opus-4-6"   # optional model override
+# timeout_seconds = 600       # optional timeout override
+# prompt_template = "/path/to/custom-planner.md"  # optional custom prompt

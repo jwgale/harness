@@ -1,0 +1,7 @@
+# Example evaluator agent definition
+# Copy to ~/.config/harness/agents/
+name = "my-evaluator"
+role = "evaluator"
+backend = "claude"
+description = "Skeptical QA evaluator"
+timeout_seconds = 600

@@ -326,3 +326,155 @@ events = ["on_eval_pass"]
     // Cleanup
     fs::remove_file(&plugin_file).ok();
 }
+
+#[test]
+fn test_agent_list_empty() {
+    let (stdout, _, ok) = run_harness(&["agent", "list"]);
+    assert!(ok);
+    assert!(stdout.contains("agent") || stdout.contains("No agents"));
+}
+
+#[test]
+fn test_agent_add_remove() {
+    let agents_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp/.config"))
+        .join("harness/agents");
+    fs::create_dir_all(&agents_dir).unwrap();
+
+    // Add
+    let (stdout, _, ok) = run_harness(&[
+        "agent", "add", "test-planner",
+        "--role", "planner",
+        "--backend", "mock",
+        "--description", "Integration test planner",
+    ]);
+    assert!(ok, "agent add failed: {stdout}");
+    assert!(stdout.contains("test-planner"));
+    assert!(agents_dir.join("test-planner.toml").exists());
+
+    // List should show it
+    let (stdout, _, ok) = run_harness(&["agent", "list"]);
+    assert!(ok);
+    assert!(stdout.contains("test-planner"));
+    assert!(stdout.contains("planner"));
+
+    // Remove
+    let (stdout, _, ok) = run_harness(&["agent", "remove", "test-planner"]);
+    assert!(ok, "agent remove failed: {stdout}");
+    assert!(stdout.contains("removed"));
+    assert!(!agents_dir.join("test-planner.toml").exists());
+}
+
+#[test]
+fn test_agent_add_invalid_role() {
+    let (_, stderr, ok) = run_harness(&[
+        "agent", "add", "bad-agent",
+        "--role", "wizard",
+        "--backend", "claude",
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("Invalid role"));
+}
+
+#[test]
+fn test_multi_agent_run_with_mock() {
+    let tmp = tempdir("multiagent");
+    run_harness_in(&tmp, &["init", "Multi-agent test"]);
+
+    let agents_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp/.config"))
+        .join("harness/agents");
+    fs::create_dir_all(&agents_dir).unwrap();
+
+    // Create test agents
+    fs::write(agents_dir.join("ma-planner.toml"), r#"
+name = "ma-planner"
+role = "planner"
+backend = "mock"
+"#).unwrap();
+
+    fs::write(agents_dir.join("ma-builder.toml"), r#"
+name = "ma-builder"
+role = "builder"
+backend = "mock"
+"#).unwrap();
+
+    fs::write(agents_dir.join("ma-evaluator.toml"), r#"
+name = "ma-evaluator"
+role = "evaluator"
+backend = "mock"
+"#).unwrap();
+
+    // Run with --agents
+    let (stdout, _, ok) = run_harness_in(&tmp, &[
+        "run", "--agents", "ma-planner,ma-builder,ma-evaluator", "--no-tui",
+    ]);
+    assert!(ok, "multi-agent run failed: {stdout}");
+    assert!(stdout.contains("Multi-agent run complete"));
+    assert!(stdout.contains("ma-planner"));
+
+    // Artifacts should exist
+    assert!(tmp.join(".harness/spec.md").exists());
+    assert!(tmp.join(".harness/evaluation.md").exists());
+
+    // Cleanup
+    fs::remove_file(agents_dir.join("ma-planner.toml")).ok();
+    fs::remove_file(agents_dir.join("ma-builder.toml")).ok();
+    fs::remove_file(agents_dir.join("ma-evaluator.toml")).ok();
+    fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn test_workflow_run_with_mock() {
+    let tmp = tempdir("workflow");
+    run_harness_in(&tmp, &["init", "Workflow test"]);
+
+    let agents_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp/.config"))
+        .join("harness/agents");
+    let workflows_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp/.config"))
+        .join("harness/workflows");
+    fs::create_dir_all(&agents_dir).unwrap();
+    fs::create_dir_all(&workflows_dir).unwrap();
+
+    // Create agents
+    fs::write(agents_dir.join("wf-planner.toml"), r#"
+name = "wf-planner"
+role = "planner"
+backend = "mock"
+"#).unwrap();
+
+    fs::write(agents_dir.join("wf-builder.toml"), r#"
+name = "wf-builder"
+role = "builder"
+backend = "mock"
+"#).unwrap();
+
+    // Create workflow
+    fs::write(workflows_dir.join("test-flow.toml"), r#"
+name = "test-flow"
+description = "Test workflow"
+max_rounds = 1
+
+[[steps]]
+agent = "wf-planner"
+
+[[steps]]
+agent = "wf-builder"
+"#).unwrap();
+
+    // Run with --workflow
+    let (stdout, stderr, ok) = run_harness_in(&tmp, &[
+        "run", "--workflow", "test-flow", "--no-tui",
+    ]);
+    assert!(ok, "workflow run failed: stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("Running workflow 'test-flow'"));
+    assert!(stdout.contains("Multi-agent run complete"));
+
+    // Cleanup
+    fs::remove_file(agents_dir.join("wf-planner.toml")).ok();
+    fs::remove_file(agents_dir.join("wf-builder.toml")).ok();
+    fs::remove_file(workflows_dir.join("test-flow.toml")).ok();
+    fs::remove_dir_all(&tmp).ok();
+}

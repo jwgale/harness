@@ -1,0 +1,16 @@
+# Example workflow: build then security review
+# Copy to ~/.config/harness/workflows/
+name = "security-audit"
+description = "Build then run security review"
+
+[[steps]]
+agent = "my-planner"
+
+[[steps]]
+agent = "my-builder"
+
+[[steps]]
+agent = "security-reviewer"
+
+[[steps]]
+agent = "my-evaluator"
