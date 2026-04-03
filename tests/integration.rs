@@ -122,6 +122,16 @@ fn test_schedule_roundtrip() {
     assert!(stdout.contains("inttest"));
     assert!(stdout.contains("0 8 * * *"));
 
+    // Manual run
+    let (stdout, _, ok) = run_harness(&["schedule", "run", "inttest"]);
+    assert!(ok, "schedule run failed: {stdout}");
+    assert!(stdout.contains("Completed"));
+
+    // History should now have an entry
+    let (stdout, _, ok) = run_harness(&["schedule", "history"]);
+    assert!(ok);
+    assert!(stdout.contains("inttest"));
+
     // Remove
     let (stdout, _, ok) = run_harness(&["schedule", "remove", "inttest"]);
     assert!(ok, "schedule remove failed: {stdout}");

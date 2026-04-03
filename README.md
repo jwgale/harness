@@ -4,6 +4,19 @@ A CLI tool that orchestrates **planner -> builder -> evaluator** loops using sub
 
 Inspired by [Anthropic's harness architecture](https://www.anthropic.com/engineering/harness-design-long-running-apps) for long-running application development with Opus 4.6.
 
+## v0.2.0 Release Notes
+
+Harness v0.2.0 is the first production-ready release, built across 8 development phases:
+
+- **Core Orchestrator** — plan -> build -> evaluate -> revise loop with TUI, prompt overrides, streaming output, and verdict parsing
+- **Local Install** — one-liner `curl` installer, XDG-compliant directory layout, `cargo install --path .`
+- **Persistent Daemon** — systemd user service with `harness daemon start/stop/status/logs`
+- **Plugin System** — TOML-based plugins with 6 lifecycle hooks, configurable timeouts, hot-reload
+- **Workspace Management** — `harness workspace register/list/remove` with inotify file watching
+- **Scheduled Tasks** — cron-style scheduling with deduplication, local timezone, execution history, manual triggers
+- **Mock Backend** — `--backend mock` for instant testing without real Claude/Codex
+- **Integration Tests** — 10+ tests running in under 1 second
+
 ## Installation
 
 ### One-liner (Linux)
@@ -74,6 +87,7 @@ harness evaluate --backend claude
 | `harness schedule add <name> "<cron>" "<cmd>"` | Add a cron-style scheduled task |
 | `harness schedule list` | List scheduled tasks |
 | `harness schedule remove <name>` | Remove a scheduled task |
+| `harness schedule run <name>` | Manually trigger a schedule now |
 | `harness schedule history [--limit N]` | Show schedule execution history |
 
 ### `harness run` options
@@ -335,17 +349,20 @@ Harness is evolving from a thin orchestrator into a full local-first agent platf
 - Integration test suite
 
 **Phase 7: Schedule Reliability + Test Speed (done)**
-- Schedule deduplication (no double-fire on daemon restart)
-- Local timezone for cron evaluation
-- Execution history (`harness schedule history`)
-- Mock backend for instant testing (`--backend mock`)
-- 10 integration tests running in <1 second
+- Schedule deduplication, local timezone, execution history
+- Mock backend for instant testing
 
-**Phase 8: Custom Evaluators + External Integrations**
+**Phase 8: Final Polish + v0.2.0 (done)**
+- Atomic state writes (write-to-temp + rename)
+- `harness schedule run <name>` manual trigger
+- History auto-rotation (500 entries max)
+- Version bump to v0.2.0
+
+**Phase 9: Custom Evaluators + External Integrations**
 - Custom evaluator strategies (Playwright MCP, curl, etc.)
 - Notification hooks (Slack, email, webhooks)
 
-**Phase 9: Multi-Agent Orchestration**
+**Phase 10: Multi-Agent Orchestration**
 - Parallel builder sessions
 - Agent specialization (frontend, backend, testing)
 - Cross-project learning via Shared Context Layer

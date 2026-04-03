@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
+use std::process::Command;
 
 use crate::xdg;
+
+const MAX_HISTORY_LINES: usize = 500;
 
 fn history_path() -> std::path::PathBuf {
     xdg::data_dir().join("schedule-history.jsonl")
@@ -125,12 +128,63 @@ pub fn remove(name: &str) -> Result<(), String> {
     fs::remove_file(&plugin_path)
         .map_err(|e| format!("Failed to remove schedule: {e}"))?;
 
-    // Clean up state
     let mut state = load_state();
     state.remove(name);
-    save_state(&state);
+    let key = format!("{name}:minute");
+    state.remove(&key);
+    save_state_atomic(&state);
 
     println!("Removed scheduled task: {name}");
+    Ok(())
+}
+
+/// Manually trigger a schedule immediately.
+pub fn run_now(name: &str) -> Result<(), String> {
+    xdg::ensure_dirs()?;
+
+    let schedules = load_schedules();
+    let Some((_, _, cmd)) = schedules.iter().find(|(n, _, _)| n == name) else {
+        return Err(format!("Schedule '{name}' not found. Use `harness schedule list` to see scheduled tasks."));
+    };
+
+    println!("Running schedule '{name}': `{cmd}`");
+    let start = std::time::Instant::now();
+
+    let result = Command::new("sh")
+        .args(["-c", cmd.as_str()])
+        .env("HARNESS_SCHEDULE", name)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output();
+
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    match result {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            for line in stdout.lines().chain(stderr.lines()) {
+                if !line.trim().is_empty() {
+                    println!("  {line}");
+                }
+            }
+            let exit_code = output.status.code().unwrap_or(-1);
+            if output.status.success() {
+                println!("Completed in {:.1}s (exit 0)", duration_ms as f64 / 1000.0);
+            } else {
+                println!("Failed with exit code {exit_code} ({:.1}s)", duration_ms as f64 / 1000.0);
+            }
+
+            // Update state and record history
+            mark_run(name);
+            record_history(name, cmd, exit_code, duration_ms);
+        }
+        Err(e) => {
+            println!("Failed to execute: {e}");
+            record_history(name, cmd, -1, duration_ms);
+            return Err(format!("Schedule execution failed: {e}"));
+        }
+    }
     Ok(())
 }
 
@@ -270,7 +324,7 @@ pub fn load_schedules() -> Vec<(String, String, String)> {
     schedules
 }
 
-// --- State persistence for deduplication ---
+// --- Atomic state persistence for deduplication ---
 
 fn load_state() -> HashMap<String, String> {
     let path = state_path();
@@ -283,9 +337,14 @@ fn load_state() -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
-fn save_state(state: &HashMap<String, String>) {
-    if let Ok(json) = serde_json::to_string_pretty(state) {
-        let _ = fs::write(state_path(), json);
+/// Atomic write: write to a temp file then rename (rename is atomic on Linux).
+fn save_state_atomic(state: &HashMap<String, String>) {
+    let path = state_path();
+    let tmp_path = path.with_extension("json.tmp");
+    if let Ok(json) = serde_json::to_string_pretty(state)
+        && fs::write(&tmp_path, &json).is_ok()
+    {
+        let _ = fs::rename(&tmp_path, &path);
     }
 }
 
@@ -298,13 +357,22 @@ pub fn should_run(name: &str, now_minute: i64) -> bool {
         return false;
     }
     state.insert(key, now_minute.to_string());
-    // Also update human-readable last_run for display
     state.insert(name.to_string(), chrono::Local::now().format("%Y-%m-%d %H:%M").to_string());
-    save_state(&state);
+    save_state_atomic(&state);
     true
 }
 
-/// Append an entry to schedule-history.jsonl
+/// Mark a schedule as having run now (for manual triggers).
+fn mark_run(name: &str) {
+    let mut state = load_state();
+    let now_minute = chrono::Local::now().timestamp() / 60;
+    let key = format!("{name}:minute");
+    state.insert(key, now_minute.to_string());
+    state.insert(name.to_string(), chrono::Local::now().format("%Y-%m-%d %H:%M").to_string());
+    save_state_atomic(&state);
+}
+
+/// Append an entry to schedule-history.jsonl, then rotate if needed.
 pub fn record_history(name: &str, command: &str, exit_code: i32, duration_ms: u64) {
     let entry = serde_json::json!({
         "timestamp": chrono::Local::now().to_rfc3339(),
@@ -317,5 +385,24 @@ pub fn record_history(name: &str, command: &str, exit_code: i32, duration_ms: u6
     let path = history_path();
     if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(file, "{}", entry);
+    }
+
+    rotate_history();
+}
+
+/// Keep only the last MAX_HISTORY_LINES entries in the history file.
+fn rotate_history() {
+    let path = history_path();
+    let Ok(content) = fs::read_to_string(&path) else { return };
+    let lines: Vec<&str> = content.lines().collect();
+
+    if lines.len() <= MAX_HISTORY_LINES {
+        return;
+    }
+
+    let keep = &lines[lines.len() - MAX_HISTORY_LINES..];
+    let tmp_path = path.with_extension("jsonl.tmp");
+    if fs::write(&tmp_path, keep.join("\n") + "\n").is_ok() {
+        let _ = fs::rename(&tmp_path, &path);
     }
 }

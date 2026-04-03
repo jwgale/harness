@@ -126,6 +126,11 @@ enum ScheduleAction {
         /// Name of the schedule to remove
         name: String,
     },
+    /// Manually trigger a scheduled task now
+    Run {
+        /// Name of the schedule to run
+        name: String,
+    },
     /// Show schedule execution history
     History {
         /// Number of entries to show
@@ -187,6 +192,7 @@ fn main() {
             ScheduleAction::Add { name, cron, command } => commands::schedule::add(&name, &cron, &command),
             ScheduleAction::List => commands::schedule::list(),
             ScheduleAction::Remove { name } => commands::schedule::remove(&name),
+            ScheduleAction::Run { name } => commands::schedule::run_now(&name),
             ScheduleAction::History { limit } => commands::schedule::history(limit),
         },
     };
