@@ -1,6 +1,9 @@
+use std::collections::HashMap;
 use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 
+use crate::plugins::{HookPoint, PluginManager};
 use crate::xdg;
 
 const SERVICE_NAME: &str = "harness";
@@ -23,13 +26,13 @@ fn harness_binary_path() -> Result<String, String> {
         .map_err(|e| format!("Failed to find harness binary path: {e}"))
 }
 
-fn service_dir() -> std::path::PathBuf {
+fn service_dir() -> PathBuf {
     dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(".config/systemd/user")
 }
 
-fn service_file_path() -> std::path::PathBuf {
+fn service_file_path() -> PathBuf {
     service_dir().join(format!("{SERVICE_NAME}.service"))
 }
 
@@ -46,7 +49,7 @@ Documentation=https://github.com/jwgale/harness
 
 [Service]
 Type=simple
-ExecStart={binary} daemon _run
+ExecStart={binary} daemon internal-run
 Restart=on-failure
 RestartSec=5
 Environment=HARNESS_DAEMON=1
@@ -79,7 +82,6 @@ fn systemctl(args: &[&str]) -> Result<String, String> {
 }
 
 fn start() -> Result<(), String> {
-    // Check if already running
     if let Ok(output) = systemctl(&["is-active", SERVICE_NAME])
         && output.trim() == "active"
     {
@@ -105,7 +107,6 @@ fn start() -> Result<(), String> {
 }
 
 fn stop() -> Result<(), String> {
-    // Check if active first
     let active = systemctl(&["is-active", SERVICE_NAME])
         .map(|s| s.trim() == "active")
         .unwrap_or(false);
@@ -134,9 +135,30 @@ fn status() -> Result<(), String> {
         _ => println!("Daemon is not running."),
     }
 
-    // Show service info if the file exists
     if service_file_path().exists() {
         println!("  Service file: {}", service_file_path().display());
+    }
+
+    // Show watched workspaces
+    let ws_dir = xdg::data_dir().join("workspaces");
+    if ws_dir.exists()
+        && let Ok(entries) = fs::read_dir(&ws_dir)
+    {
+        let workspaces: Vec<String> = entries
+            .flatten()
+            .filter(|e| e.path().is_file())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        if !workspaces.is_empty() {
+            println!();
+            println!("Watched workspaces ({}):", workspaces.len());
+            for ws in &workspaces {
+                let ws_name = ws.strip_suffix(".path").unwrap_or(ws);
+                if let Ok(path) = fs::read_to_string(ws_dir.join(ws)) {
+                    println!("  {ws_name}: {}", path.trim());
+                }
+            }
+        }
     }
 
     println!();
@@ -172,13 +194,75 @@ pub fn run_daemon_loop() -> Result<(), String> {
     fs::write(&pid_file, pid.to_string())
         .map_err(|e| format!("Failed to write PID file: {e}"))?;
 
-    eprintln!("Harness daemon started (PID {pid})");
-    eprintln!("Watching for agent triggers...");
+    // Ensure workspaces directory exists
+    let ws_dir = data_dir.join("workspaces");
+    fs::create_dir_all(&ws_dir)
+        .map_err(|e| format!("Failed to create workspaces dir: {e}"))?;
 
-    // Main daemon loop — for now, just stay alive and log heartbeats.
-    // Future: watch .harness/ directories, fire plugin hooks, manage agent sessions.
+    eprintln!("Harness daemon started (PID {pid})");
+    eprintln!("Watching workspaces in: {}", ws_dir.display());
+
+    let pm = PluginManager::load();
+
+    // Track file modification times for change detection
+    let mut known_states: HashMap<PathBuf, u64> = HashMap::new();
+    let poll_interval = std::time::Duration::from_secs(10);
+
     loop {
-        std::thread::sleep(std::time::Duration::from_secs(60));
-        eprintln!("Harness daemon heartbeat (PID {pid})");
+        // Scan registered workspaces for .harness/ changes
+        if let Ok(entries) = fs::read_dir(&ws_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file()
+                    && let Ok(workspace_path) = fs::read_to_string(&path)
+                {
+                    let workspace_path = workspace_path.trim();
+                    let harness_dir = PathBuf::from(workspace_path).join(".harness");
+                    if harness_dir.exists() {
+                        check_workspace_changes(&harness_dir, workspace_path, &mut known_states, &pm);
+                    }
+                }
+            }
+        }
+
+        std::thread::sleep(poll_interval);
     }
+}
+
+/// Check a workspace's .harness/ directory for file changes and fire hooks.
+fn check_workspace_changes(
+    harness_dir: &std::path::Path,
+    workspace_name: &str,
+    known_states: &mut HashMap<PathBuf, u64>,
+    pm: &PluginManager,
+) {
+    let watched_files = [
+        ("spec.md", HookPoint::AfterPlan),
+        ("status.md", HookPoint::AfterBuild),
+        ("evaluation.md", HookPoint::AfterEvaluate),
+    ];
+
+    for (file, hook) in &watched_files {
+        let file_path = harness_dir.join(file);
+        if !file_path.exists() {
+            continue;
+        }
+        let mtime = file_mtime(&file_path);
+        let prev = known_states.get(&file_path).copied();
+
+        if let Some(prev_mtime) = prev
+            && mtime != prev_mtime
+        {
+            eprintln!("[daemon] {workspace_name}: {file} changed, firing {}", hook.label());
+            pm.fire(*hook);
+        }
+        known_states.insert(file_path, mtime);
+    }
+}
+
+fn file_mtime(path: &PathBuf) -> u64 {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs())
+        .unwrap_or(0)
 }

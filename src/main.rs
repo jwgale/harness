@@ -65,16 +65,31 @@ enum Commands {
     Reset,
     /// Show latest evaluator feedback
     Feedback,
-    /// Manage the persistent daemon (start/stop/status/logs)
+    /// Manage the persistent daemon
     Daemon {
-        /// Action: start, stop, status, or logs
-        action: String,
+        #[command(subcommand)]
+        action: DaemonAction,
     },
     /// Manage plugins
     Plugin {
         #[command(subcommand)]
         action: PluginAction,
     },
+}
+
+#[derive(Subcommand)]
+enum DaemonAction {
+    /// Start the daemon as a systemd user service
+    Start,
+    /// Stop the daemon
+    Stop,
+    /// Show daemon status
+    Status,
+    /// Show recent daemon logs
+    Logs,
+    /// Internal: run the daemon loop (used by systemd)
+    #[command(hide = true)]
+    InternalRun,
 }
 
 #[derive(Subcommand)]
@@ -101,8 +116,13 @@ fn main() {
         Commands::Status => commands::status::run(),
         Commands::Reset => commands::reset::run(),
         Commands::Feedback => commands::feedback::run(),
-        Commands::Daemon { ref action } if action == "_run" => commands::daemon::run_daemon_loop(),
-        Commands::Daemon { action } => commands::daemon::run(&action),
+        Commands::Daemon { action } => match action {
+            DaemonAction::Start => commands::daemon::run("start"),
+            DaemonAction::Stop => commands::daemon::run("stop"),
+            DaemonAction::Status => commands::daemon::run("status"),
+            DaemonAction::Logs => commands::daemon::run("logs"),
+            DaemonAction::InternalRun => commands::daemon::run_daemon_loop(),
+        },
         Commands::Plugin { action } => match action {
             PluginAction::List => plugins::list(),
         },

@@ -1,0 +1,25 @@
+# Example Harness Plugin
+#
+# To install: cp this file to ~/.config/harness/plugins/example.toml
+# To install the hook script: cp plugins/example-hook.sh to somewhere in your PATH
+#
+# Available hook points:
+#   before_plan, after_plan
+#   before_build, after_build
+#   before_evaluate, after_evaluate
+#
+# Environment variables available to hooks:
+#   HARNESS_HOOK        - which hook is firing (e.g. "after_build")
+#   HARNESS_PLUGIN      - plugin name
+#   HARNESS_PROJECT     - project directory name
+#   HARNESS_DIR         - path to .harness/ directory
+#   HARNESS_PLUGINS_DIR - path to plugins directory
+
+name = "example"
+description = "Example plugin that logs lifecycle events"
+version = "0.1.0"
+
+[hooks]
+before_plan = "echo \"[example] Planning starting for $HARNESS_PROJECT\""
+after_build = "echo \"[example] Build complete for $HARNESS_PROJECT\" && echo \"[example] Artifacts in $HARNESS_DIR\""
+after_evaluate = "echo \"[example] Evaluation complete for $HARNESS_PROJECT\""

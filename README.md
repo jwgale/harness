@@ -156,7 +156,7 @@ harness daemon logs     # View recent daemon logs
 harness daemon stop     # Stop and disable the service
 ```
 
-The daemon is currently a heartbeat process. Future phases will add file-watch triggers, workspace-based agent sessions, and plugin hook execution.
+The daemon polls registered workspaces (in `~/.local/share/harness/workspaces/`) for `.harness/` artifact changes and fires plugin hooks when files are modified.
 
 ## Plugins
 
@@ -181,7 +181,36 @@ List installed plugins:
 harness plugin list
 ```
 
-Hooks are discovered and logged during `harness run`. Actual execution is coming in Phase 4.
+Hooks execute as shell commands with environment variables:
+
+| Variable | Description |
+|----------|-------------|
+| `HARNESS_HOOK` | Which hook is firing (e.g. `after_build`) |
+| `HARNESS_PLUGIN` | Plugin name |
+| `HARNESS_PROJECT` | Project directory name |
+| `HARNESS_DIR` | Path to `.harness/` directory |
+| `HARNESS_PLUGINS_DIR` | Path to plugins directory |
+
+Hooks fire during `harness plan`, `harness build`, `harness evaluate`, and `harness run`.
+
+### Writing Your First Plugin
+
+1. Create a TOML file in `~/.config/harness/plugins/`:
+
+```toml
+# ~/.config/harness/plugins/my-tests.toml
+name = "my-tests"
+description = "Run cargo test after every build"
+version = "0.1.0"
+
+[hooks]
+after_build = "cargo test 2>&1 || echo 'Tests failed!'"
+```
+
+2. Verify it's loaded: `harness plugin list`
+3. Run a build — the hook will execute automatically.
+
+See `plugins/example.toml` in the repo for a complete example with all hook points.
 
 ## Configuration
 
@@ -221,13 +250,19 @@ Harness is evolving from a thin orchestrator into a full local-first agent platf
 - `harness plugin list` with hook counts
 - Hook discovery and logging (execution in Phase 4)
 
-**Phase 4: Plugin Execution + Workspace Triggers**
-- Hook command execution (before/after plan, build, evaluate)
+**Phase 4: Executable Hooks + Active Daemon (done)**
+- Plugin hooks now execute shell commands with env vars
+- Hooks fire in all commands (plan, build, evaluate, run)
+- Daemon actively polls workspaces for artifact changes
+- `harness plugin list` shows executable commands per hook
+- Example plugin included in repo
+
+**Phase 5: Workspace Triggers + Custom Evaluators**
 - File-watch triggers for automatic re-evaluation
 - Custom evaluator strategies (Playwright MCP, curl, etc.)
-- Daemon workspace monitoring
+- Daemon-triggered builds from workspace changes
 
-**Phase 5: Multi-Agent Orchestration**
+**Phase 6: Multi-Agent Orchestration**
 - Parallel builder sessions
 - Agent specialization (frontend, backend, testing)
 - Cross-project learning via Shared Context Layer

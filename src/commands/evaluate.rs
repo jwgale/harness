@@ -1,6 +1,7 @@
 use crate::artifacts;
 use crate::cli_backend::{self, Backend};
 use crate::config::Config;
+use crate::plugins::{PluginManager, HookPoint};
 use crate::prompts;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -14,11 +15,13 @@ pub fn run(backend_override: Option<&str>) -> Result<Verdict, String> {
     artifacts::ensure_harness_exists()?;
     let config = Config::load(&artifacts::harness_dir())?;
     let backend = Backend::from_str(backend_override.unwrap_or(&config.backend))?;
+    let pm = PluginManager::load();
 
     if !artifacts::artifact_exists("spec.md") {
         return Err("No spec.md found. Run `harness plan` first.".to_string());
     }
 
+    pm.fire(HookPoint::BeforeEvaluate);
     println!("Running evaluator...");
     let prompt = prompts::evaluator_prompt()?;
     let output = cli_backend::run_oneshot(&backend, &config.model, &prompt, config.evaluator_timeout_seconds)?;
@@ -32,6 +35,7 @@ pub fn run(backend_override: Option<&str>) -> Result<Verdict, String> {
 
     // Parse verdict
     let verdict = parse_verdict(&output);
+    pm.fire(HookPoint::AfterEvaluate);
     println!("Evaluation written to .harness/evaluation.md");
     println!("Verdict: {verdict:?}");
 

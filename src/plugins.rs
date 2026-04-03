@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use std::fs;
+use std::process::Command;
 
 use crate::xdg;
 
@@ -35,7 +36,7 @@ pub enum HookPoint {
 }
 
 impl HookPoint {
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             HookPoint::BeforePlan => "before_plan",
             HookPoint::AfterPlan => "after_plan",
@@ -62,12 +63,13 @@ impl PluginManager {
         Self { plugins }
     }
 
-    /// Fire a hook point — logs which plugins have hooks registered.
-    /// Actual execution will come in a later phase.
+    /// Fire a hook point — execute registered commands for each plugin.
     pub fn fire(&self, point: HookPoint) {
         let label = point.label();
+        let project_name = detect_project_name();
+
         for plugin in &self.plugins {
-            let cmd = plugin.hooks.as_ref().and_then(|h| match point {
+            let cmd_str = plugin.hooks.as_ref().and_then(|h| match point {
                 HookPoint::BeforePlan => h.before_plan.as_deref(),
                 HookPoint::AfterPlan => h.after_plan.as_deref(),
                 HookPoint::BeforeBuild => h.before_build.as_deref(),
@@ -75,8 +77,9 @@ impl PluginManager {
                 HookPoint::BeforeEvaluate => h.before_evaluate.as_deref(),
                 HookPoint::AfterEvaluate => h.after_evaluate.as_deref(),
             });
-            if let Some(cmd) = cmd {
-                eprintln!("[plugin:{}] hook {label} -> `{cmd}` (not yet executed)", plugin.name);
+            if let Some(cmd_str) = cmd_str {
+                eprintln!("[plugin:{}] {label} -> `{cmd_str}`", plugin.name);
+                execute_hook(&plugin.name, label, cmd_str, &project_name);
             }
         }
     }
@@ -85,6 +88,52 @@ impl PluginManager {
     pub fn count(&self) -> usize {
         self.plugins.len()
     }
+}
+
+/// Execute a hook command with environment variables.
+fn execute_hook(plugin_name: &str, hook_label: &str, cmd_str: &str, project_name: &str) {
+    let cwd = std::env::current_dir().unwrap_or_default();
+
+    let result = Command::new("sh")
+        .args(["-c", cmd_str])
+        .env("HARNESS_HOOK", hook_label)
+        .env("HARNESS_PLUGIN", plugin_name)
+        .env("HARNESS_PROJECT", project_name)
+        .env("HARNESS_DIR", cwd.join(".harness").to_string_lossy().as_ref())
+        .env("HARNESS_PLUGINS_DIR", xdg::plugins_dir().to_string_lossy().as_ref())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output();
+
+    match result {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stdout.trim().is_empty() {
+                for line in stdout.lines() {
+                    eprintln!("[plugin:{plugin_name}] {line}");
+                }
+            }
+            if !stderr.trim().is_empty() {
+                for line in stderr.lines() {
+                    eprintln!("[plugin:{plugin_name}] stderr: {line}");
+                }
+            }
+            if !output.status.success() {
+                eprintln!("[plugin:{plugin_name}] hook {hook_label} exited with {}", output.status);
+            }
+        }
+        Err(e) => {
+            eprintln!("[plugin:{plugin_name}] hook {hook_label} failed to execute: {e}");
+        }
+    }
+}
+
+fn detect_project_name() -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_string()))
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Discover all plugin manifests in ~/.config/harness/plugins/*.toml
@@ -136,17 +185,25 @@ pub fn list() -> Result<(), String> {
     for p in &plugins {
         let desc = p.description.as_deref().unwrap_or("(no description)");
         let ver = p.version.as_deref().unwrap_or("?");
-        let hook_count = count_hooks(&p.hooks);
-        println!("  {} v{} — {} ({} hooks)", p.name, ver, desc, hook_count);
+        println!("  {} v{} — {}", p.name, ver, desc);
+        print_hooks(&p.hooks);
     }
     Ok(())
 }
 
-fn count_hooks(hooks: &Option<PluginHooks>) -> usize {
-    let Some(h) = hooks else { return 0 };
-    [
-        &h.before_plan, &h.after_plan,
-        &h.before_build, &h.after_build,
-        &h.before_evaluate, &h.after_evaluate,
-    ].iter().filter(|x| x.is_some()).count()
+fn print_hooks(hooks: &Option<PluginHooks>) {
+    let Some(h) = hooks else { return };
+    let entries: Vec<(&str, &Option<String>)> = vec![
+        ("before_plan", &h.before_plan),
+        ("after_plan", &h.after_plan),
+        ("before_build", &h.before_build),
+        ("after_build", &h.after_build),
+        ("before_evaluate", &h.before_evaluate),
+        ("after_evaluate", &h.after_evaluate),
+    ];
+    for (label, cmd) in entries {
+        if let Some(cmd) = cmd {
+            println!("    {label}: `{cmd}`");
+        }
+    }
 }
