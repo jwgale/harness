@@ -65,13 +65,22 @@ enum Commands {
     Reset,
     /// Show latest evaluator feedback
     Feedback,
-    /// Manage the persistent daemon (start/stop/status)
+    /// Manage the persistent daemon (start/stop/status/logs)
     Daemon {
-        /// Action: start, stop, or status
+        /// Action: start, stop, status, or logs
         action: String,
     },
+    /// Manage plugins
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum PluginAction {
     /// List installed plugins
-    Plugins,
+    List,
 }
 
 fn main() {
@@ -92,8 +101,11 @@ fn main() {
         Commands::Status => commands::status::run(),
         Commands::Reset => commands::reset::run(),
         Commands::Feedback => commands::feedback::run(),
+        Commands::Daemon { ref action } if action == "_run" => commands::daemon::run_daemon_loop(),
         Commands::Daemon { action } => commands::daemon::run(&action),
-        Commands::Plugins => plugins::list(),
+        Commands::Plugin { action } => match action {
+            PluginAction::List => plugins::list(),
+        },
     };
 
     if let Err(e) = result {

@@ -18,6 +18,7 @@ use crate::artifacts;
 use crate::cli_backend::{self, Backend, StreamingProcess};
 use crate::commands::evaluate;
 use crate::config::Config;
+use crate::plugins::{PluginManager, HookPoint};
 use crate::prompts;
 
 use self::output_panel::OutputPanel;
@@ -143,8 +144,11 @@ fn run_loop(
     eval_timeout: u64,
     tx: &mpsc::Sender<TuiEvent>,
 ) -> Result<String, String> {
+    let pm = PluginManager::load();
+
     // Phase 1: Plan
     let _ = tx.send(TuiEvent::PhaseChange(TuiPhase::Plan, 0));
+    pm.fire(HookPoint::BeforePlan);
     let prompt = prompts::planner_prompt(
         &artifacts::read_artifact("goal.md")?,
     );
@@ -152,6 +156,7 @@ fn run_loop(
     let output = drain_streaming(proc, tx);
     let plan_output = output?;
     artifacts::write_artifact("spec.md", &plan_output)?;
+    pm.fire(HookPoint::AfterPlan);
     let _ = tx.send(TuiEvent::PhaseComplete);
 
     // Phase 2+3: Build → Evaluate loop
@@ -159,13 +164,16 @@ fn run_loop(
         // Build
         let _ = tx.send(TuiEvent::PhaseChange(TuiPhase::Build, round));
         save_run_metadata(round, backend)?;
+        pm.fire(HookPoint::BeforeBuild);
         let prompt = prompts::builder_prompt()?;
         let proc = cli_backend::run_builder_streaming(backend, model, &prompt, builder_timeout)?;
         let _output = drain_streaming(proc, tx)?;
+        pm.fire(HookPoint::AfterBuild);
         let _ = tx.send(TuiEvent::PhaseComplete);
 
         // Evaluate
         let _ = tx.send(TuiEvent::PhaseChange(TuiPhase::Evaluate, round));
+        pm.fire(HookPoint::BeforeEvaluate);
         let prompt = prompts::evaluator_prompt()?;
         let proc = cli_backend::run_oneshot_streaming(backend, model, &prompt, eval_timeout)?;
         let eval_output = drain_streaming(proc, tx)?;
@@ -176,6 +184,7 @@ fn run_loop(
 
         let verdict = evaluate::parse_verdict(&eval_output);
         let scores = EvalScores::parse(&eval_output);
+        pm.fire(HookPoint::AfterEvaluate);
         let _ = tx.send(TuiEvent::EvalResult(scores, verdict.clone()));
         let _ = tx.send(TuiEvent::PhaseComplete);
 

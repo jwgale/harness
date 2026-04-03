@@ -66,8 +66,8 @@ harness evaluate --backend claude
 | `harness status` | Print current harness state |
 | `harness reset` | Generate `handoff.md` for context reset |
 | `harness feedback` | Show latest evaluator feedback |
-| `harness daemon <action>` | Manage persistent daemon (start/stop/status) |
-| `harness plugins` | List installed plugins |
+| `harness daemon <action>` | Manage persistent daemon (start/stop/status/logs) |
+| `harness plugin list` | List installed plugins |
 
 ### `harness run` options
 
@@ -145,9 +145,22 @@ The binary embeds default prompt templates. To override them, place custom versi
 
 If a file exists in `.harness/prompts/`, it takes precedence over the embedded default.
 
+## Daemon
+
+The harness daemon runs as a systemd user service for persistent background agent orchestration.
+
+```bash
+harness daemon start    # Install and start the systemd user service
+harness daemon status   # Check if the daemon is running
+harness daemon logs     # View recent daemon logs
+harness daemon stop     # Stop and disable the service
+```
+
+The daemon is currently a heartbeat process. Future phases will add file-watch triggers, workspace-based agent sessions, and plugin hook execution.
+
 ## Plugins
 
-Plugins are TOML manifests placed in `~/.config/harness/plugins/`. Discovery is implemented; execution hooks are coming.
+Plugins are TOML manifests placed in `~/.config/harness/plugins/`. They declare lifecycle hooks that fire during the plan/build/evaluate loop.
 
 ```toml
 # ~/.config/harness/plugins/my-plugin.toml
@@ -156,13 +169,19 @@ description = "Run tests after every build"
 version = "0.1.0"
 
 [hooks]
+before_plan = "echo 'Planning...'"
 after_build = "cargo test"
+before_evaluate = "cargo clippy"
 ```
+
+Available hook points: `before_plan`, `after_plan`, `before_build`, `after_build`, `before_evaluate`, `after_evaluate`.
 
 List installed plugins:
 ```bash
-harness plugins
+harness plugin list
 ```
+
+Hooks are discovered and logged during `harness run`. Actual execution is coming in Phase 4.
 
 ## Configuration
 
@@ -196,16 +215,17 @@ Harness is evolving from a thin orchestrator into a full local-first agent platf
 - Plugin/skill system foundation
 - Daemon skeleton
 
-**Phase 3: Persistent Daemon**
-- Background agent runner (`harness daemon start`)
-- Workspace-based agent sessions
-- Systemd user service integration
-- File-watch triggers for automatic re-evaluation
+**Phase 3: Persistent Daemon + Plugin Hooks (done)**
+- Systemd user service daemon (`harness daemon start/stop/status/logs`)
+- Plugin hook points wired into plan/build/evaluate lifecycle
+- `harness plugin list` with hook counts
+- Hook discovery and logging (execution in Phase 4)
 
-**Phase 4: Plugin Execution**
-- Hook execution (before/after plan, build, evaluate)
+**Phase 4: Plugin Execution + Workspace Triggers**
+- Hook command execution (before/after plan, build, evaluate)
+- File-watch triggers for automatic re-evaluation
 - Custom evaluator strategies (Playwright MCP, curl, etc.)
-- Plugin marketplace / registry
+- Daemon workspace monitoring
 
 **Phase 5: Multi-Agent Orchestration**
 - Parallel builder sessions

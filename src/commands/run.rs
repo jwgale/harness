@@ -2,6 +2,7 @@ use crate::artifacts;
 use crate::commands::{build, evaluate, plan};
 use crate::config::Config;
 use crate::commands::evaluate::Verdict;
+use crate::plugins::{PluginManager, HookPoint};
 use std::io::{self, Write};
 
 pub fn run(
@@ -27,9 +28,12 @@ fn run_plain(
     artifacts::ensure_harness_exists()?;
     let config = Config::load(&artifacts::harness_dir())?;
     let max = max_rounds.unwrap_or(config.max_eval_rounds);
+    let pm = PluginManager::load();
 
     // Phase 1: Plan
+    pm.fire(HookPoint::BeforePlan);
     plan::run(backend_override)?;
+    pm.fire(HookPoint::AfterPlan);
 
     if pause_after_plan {
         println!("\n--- Plan complete. Review .harness/spec.md ---");
@@ -45,10 +49,14 @@ fn run_plain(
         save_run_metadata(round, backend_override.unwrap_or(&config.backend))?;
 
         // Build
+        pm.fire(HookPoint::BeforeBuild);
         build::run(backend_override)?;
+        pm.fire(HookPoint::AfterBuild);
 
         // Evaluate
+        pm.fire(HookPoint::BeforeEvaluate);
         let verdict = evaluate::run(backend_override)?;
+        pm.fire(HookPoint::AfterEvaluate);
 
         // Update run metadata with outcome
         update_run_outcome(round, &verdict)?;
