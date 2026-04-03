@@ -9,3 +9,4 @@ pub mod feedback;
 pub mod daemon;
 pub mod workspace;
 pub mod schedule;
+pub mod context;

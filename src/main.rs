@@ -2,6 +2,7 @@ mod artifacts;
 mod cli_backend;
 mod commands;
 mod config;
+mod global_config;
 mod plugins;
 mod prompts;
 mod tui;
@@ -85,6 +86,11 @@ enum Commands {
         #[command(subcommand)]
         action: ScheduleAction,
     },
+    /// Shared Context Layer integration
+    Context {
+        #[command(subcommand)]
+        action: ContextAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -155,7 +161,28 @@ enum WorkspaceAction {
     },
 }
 
+#[derive(Subcommand)]
+enum ContextAction {
+    /// Show SCL connection status
+    Status,
+    /// Query the shared context layer
+    Query {
+        /// Query text
+        query: String,
+    },
+    /// Record an entry to the shared context layer
+    Record {
+        /// Entry type (e.g. decision, convention, progress)
+        entry_type: String,
+        /// Content to record
+        content: String,
+    },
+}
+
 fn main() {
+    // Ensure global config exists on first run
+    let _ = global_config::ensure_global_config();
+
     let cli = Cli::parse();
 
     let result = match cli.command {
@@ -194,6 +221,11 @@ fn main() {
             ScheduleAction::Remove { name } => commands::schedule::remove(&name),
             ScheduleAction::Run { name } => commands::schedule::run_now(&name),
             ScheduleAction::History { limit } => commands::schedule::history(limit),
+        },
+        Commands::Context { action } => match action {
+            ContextAction::Status => commands::context::status(),
+            ContextAction::Query { query } => commands::context::query(&query),
+            ContextAction::Record { entry_type, content } => commands::context::record(&entry_type, &content),
         },
     };
 

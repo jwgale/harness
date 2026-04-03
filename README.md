@@ -14,6 +14,7 @@ Harness v0.2.0 is the first production-ready release, built across 8 development
 - **Plugin System** — TOML-based plugins with 6 lifecycle hooks, configurable timeouts, hot-reload
 - **Workspace Management** — `harness workspace register/list/remove` with inotify file watching
 - **Scheduled Tasks** — cron-style scheduling with deduplication, local timezone, execution history, manual triggers
+- **Shared Context Layer** — built-in MCP integration gives every session access to long-term memory and decisions
 - **Mock Backend** — `--backend mock` for instant testing without real Claude/Codex
 - **Integration Tests** — 10+ tests running in under 1 second
 
@@ -89,6 +90,9 @@ harness evaluate --backend claude
 | `harness schedule remove <name>` | Remove a scheduled task |
 | `harness schedule run <name>` | Manually trigger a schedule now |
 | `harness schedule history [--limit N]` | Show schedule execution history |
+| `harness context status` | Show SCL connection status |
+| `harness context query "<text>"` | Query the Shared Context Layer |
+| `harness context record <type> "<text>"` | Record an entry to SCL |
 
 ### `harness run` options
 
@@ -293,7 +297,45 @@ harness plan --backend mock    # instant mock response
 harness run --backend mock     # full loop with mock responses
 ```
 
+## Shared Context Layer (SCL)
+
+Harness integrates with the [Shared Context Layer](https://github.com/jwgale/shared-context-layer) MCP server so every planner, builder, and evaluator session automatically has access to long-term memory, architectural decisions, and cross-project learnings.
+
+When the SCL is enabled and reachable, harness automatically passes `--mcp-config` to all Claude Code invocations. No manual MCP configuration needed.
+
+```bash
+# Check connection
+harness context status
+
+# Query shared context
+harness context query "recent architectural decisions"
+
+# Record a decision
+harness context record decision "Chose SQLite over Postgres for local-first storage"
+```
+
+Configure in `~/.config/harness/config.toml`:
+```toml
+[shared_context]
+enabled = true
+url = "http://127.0.0.1:3100/mcp"
+```
+
+Set `enabled = false` to disable SCL integration. If the SCL server is unreachable, harness silently falls back to running without it.
+
 ## Configuration
+
+### Global Config
+
+`~/.config/harness/config.toml` is created automatically on first run:
+
+```toml
+[shared_context]
+enabled = true
+url = "http://127.0.0.1:3100/mcp"
+```
+
+### Project Config
 
 `.harness/config.json` is created by `harness init`:
 
@@ -353,16 +395,19 @@ Harness is evolving from a thin orchestrator into a full local-first agent platf
 - Mock backend for instant testing
 
 **Phase 8: Final Polish + v0.2.0 (done)**
-- Atomic state writes (write-to-temp + rename)
-- `harness schedule run <name>` manual trigger
-- History auto-pruning (entries older than 60 days removed)
-- Version bump to v0.2.0
+- Atomic state writes, manual schedule trigger, 60-day history pruning
 
-**Phase 9: Custom Evaluators + External Integrations**
+**Phase 9: Shared Context Layer Integration (done)**
+- Built-in MCP config injection for all Claude Code sessions
+- `harness context status/query/record` commands
+- Auto-generated global config with SCL settings
+- Graceful fallback when SCL is unreachable
+
+**Phase 10: Custom Evaluators + External Integrations**
 - Custom evaluator strategies (Playwright MCP, curl, etc.)
 - Notification hooks (Slack, email, webhooks)
 
-**Phase 10: Multi-Agent Orchestration**
+**Phase 11: Multi-Agent Orchestration**
 - Parallel builder sessions
 - Agent specialization (frontend, backend, testing)
 - Cross-project learning via Shared Context Layer

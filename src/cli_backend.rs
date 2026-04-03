@@ -3,6 +3,8 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
+use crate::global_config::{self, GlobalConfig};
+
 pub enum Backend {
     Claude,
     Codex,
@@ -20,8 +22,26 @@ impl Backend {
     }
 }
 
+/// Build the base claude command with model, permissions, and optional MCP config.
+fn claude_cmd(model: &str) -> Command {
+    let mut cmd = Command::new("claude");
+    cmd.args(["--print", "--permission-mode", "bypassPermissions", "--model", model]);
+
+    // Inject SCL MCP config if enabled and reachable
+    let gc = GlobalConfig::load();
+    if let Some(scl) = gc.scl()
+        && global_config::check_scl_health(scl.url())
+        && let Ok(mcp_path) = global_config::generate_mcp_config(scl.url())
+    {
+        cmd.arg("--mcp-config");
+        cmd.arg(mcp_path);
+        eprintln!("[scl] Connected: {}", scl.url());
+    }
+
+    cmd
+}
+
 /// Run a one-shot prompt through the backend and return the output.
-/// Used for planner and evaluator.
 pub fn run_oneshot(backend: &Backend, model: &str, prompt: &str, timeout_secs: u64) -> Result<String, String> {
     match backend {
         Backend::Claude => run_claude_oneshot(model, prompt, timeout_secs),
@@ -31,7 +51,6 @@ pub fn run_oneshot(backend: &Backend, model: &str, prompt: &str, timeout_secs: u
 }
 
 /// Run the builder (full agent session with file I/O).
-/// The builder reads/writes files directly in the working directory.
 pub fn run_builder(backend: &Backend, model: &str, prompt: &str, timeout_secs: u64) -> Result<String, String> {
     match backend {
         Backend::Claude => run_claude_builder(model, prompt, timeout_secs),
@@ -45,8 +64,9 @@ fn mock_response(phase: &str) -> String {
 }
 
 fn run_claude_oneshot(model: &str, prompt: &str, timeout_secs: u64) -> Result<String, String> {
-    let mut child = Command::new("claude")
-        .args(["--print", "--permission-mode", "bypassPermissions", "--model", model, "-p", prompt])
+    let mut cmd = claude_cmd(model);
+    cmd.args(["-p", prompt]);
+    let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -65,10 +85,9 @@ fn run_claude_oneshot(model: &str, prompt: &str, timeout_secs: u64) -> Result<St
 }
 
 fn run_claude_builder(model: &str, prompt: &str, timeout_secs: u64) -> Result<String, String> {
-    // Builder uses --print mode with full agent capabilities
-    // Pass prompt as -p argument, null stdin to prevent blocking
-    let mut child = Command::new("claude")
-        .args(["--print", "--permission-mode", "bypassPermissions", "--model", model, "-p", prompt])
+    let mut cmd = claude_cmd(model);
+    cmd.args(["-p", prompt]);
+    let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -159,7 +178,6 @@ impl StreamingProcess {
             match self.child.try_wait() {
                 Ok(Some(status)) => {
                     if !status.success() {
-                        // Collect stderr
                         let mut stderr_buf = Vec::new();
                         if let Some(mut err) = self.child.stderr.take() {
                             let _ = std::io::Read::read_to_end(&mut err, &mut stderr_buf);
@@ -180,10 +198,9 @@ impl StreamingProcess {
             }
         }
     }
-
 }
 
-/// Spawn a command with no stdin (prompt passed as arg) and stream stdout line-by-line.
+/// Spawn a command with no stdin and stream stdout line-by-line.
 fn spawn_streaming_no_stdin(mut cmd: Command, timeout_secs: u64) -> Result<StreamingProcess, String> {
     let mut child = cmd
         .stdin(Stdio::null())
@@ -244,7 +261,6 @@ fn spawn_streaming(mut cmd: Command, prompt: &str, timeout_secs: u64) -> Result<
             match line {
                 Ok(l) => {
                     all_lines.push(l.clone());
-                    // If receiver is dropped, keep reading to drain the pipe
                     let _ = tx.send(l);
                 }
                 Err(_) => break,
@@ -265,8 +281,8 @@ fn spawn_streaming(mut cmd: Command, prompt: &str, timeout_secs: u64) -> Result<
 pub fn run_oneshot_streaming(backend: &Backend, model: &str, prompt: &str, timeout_secs: u64) -> Result<StreamingProcess, String> {
     match backend {
         Backend::Claude => {
-            let mut cmd = Command::new("claude");
-            cmd.args(["--print", "--permission-mode", "bypassPermissions", "--model", model, "-p", prompt]);
+            let mut cmd = claude_cmd(model);
+            cmd.args(["-p", prompt]);
             spawn_streaming_no_stdin(cmd, timeout_secs)
         }
         Backend::Codex => {
@@ -282,8 +298,8 @@ pub fn run_oneshot_streaming(backend: &Backend, model: &str, prompt: &str, timeo
 pub fn run_builder_streaming(backend: &Backend, model: &str, prompt: &str, timeout_secs: u64) -> Result<StreamingProcess, String> {
     match backend {
         Backend::Claude => {
-            let mut cmd = Command::new("claude");
-            cmd.args(["--print", "--permission-mode", "bypassPermissions", "--model", model, "-p", prompt]);
+            let mut cmd = claude_cmd(model);
+            cmd.args(["-p", prompt]);
             spawn_streaming_no_stdin(cmd, timeout_secs)
         }
         Backend::Codex => {
@@ -307,8 +323,7 @@ fn wait_with_timeout(child: &mut std::process::Child, timeout_secs: u64) -> Resu
 
     loop {
         match child.try_wait() {
-            Ok(Some(_status)) => {
-                // Process finished, collect output
+            Ok(Some(status)) => {
                 let mut stdout = Vec::new();
                 let mut stderr = Vec::new();
                 if let Some(mut out) = child.stdout.take() {
@@ -320,13 +335,12 @@ fn wait_with_timeout(child: &mut std::process::Child, timeout_secs: u64) -> Resu
                         .map_err(|e| format!("Failed to read stderr: {e}"))?;
                 }
                 return Ok(std::process::Output {
-                    status: _status,
+                    status,
                     stdout,
                     stderr,
                 });
             }
             Ok(None) => {
-                // Still running
                 if start.elapsed() > timeout {
                     let _ = child.kill();
                     return Err(format!("Process timed out after {timeout_secs}s"));
