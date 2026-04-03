@@ -1,7 +1,7 @@
-# Example workflow: standard plan → build → evaluate
+# Example workflow: standard plan → build → evaluate with revision loop
 # Copy to ~/.config/harness/workflows/
 name = "standard"
-description = "Standard plan-build-evaluate workflow"
+description = "Standard plan-build-evaluate workflow with iterative revision"
 max_rounds = 3
 
 [[steps]]
@@ -9,6 +9,8 @@ agent = "my-planner"
 
 [[steps]]
 agent = "my-builder"
+loop_until = "pass"
+max_rounds = 3
 
 [[steps]]
 agent = "my-evaluator"

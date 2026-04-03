@@ -71,6 +71,9 @@ enum Commands {
         /// Named workflow to run (from ~/.config/harness/workflows/)
         #[arg(long)]
         workflow: Option<String>,
+        /// Run --agents in parallel (concurrent execution)
+        #[arg(long)]
+        parallel: bool,
     },
     /// Print current harness state from artifacts
     Status,
@@ -112,6 +115,11 @@ enum Commands {
     Agent {
         #[command(subcommand)]
         action: AgentAction,
+    },
+    /// Manage and validate workflows
+    Workflow {
+        #[command(subcommand)]
+        action: WorkflowAction2,
     },
 }
 
@@ -179,6 +187,17 @@ enum WorkspaceAction {
     /// Remove a registered workspace
     Remove {
         /// Name of the workspace to remove
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkflowAction2 {
+    /// List all defined workflows
+    List,
+    /// Validate a workflow definition
+    Validate {
+        /// Workflow name
         name: String,
     },
 }
@@ -256,6 +275,7 @@ fn main() {
             no_tui,
             agents,
             workflow,
+            parallel,
         } => {
             if agents.is_some() || workflow.is_some() {
                 commands::run::run_multi_agent(
@@ -263,6 +283,7 @@ fn main() {
                     max_rounds,
                     agents.as_deref(),
                     workflow.as_deref(),
+                    parallel,
                 )
             } else {
                 commands::run::run(backend.as_deref(), max_rounds, pause_after_plan, pause_after_eval, no_tui)
@@ -308,6 +329,10 @@ fn main() {
                 commands::agent_cmd::add(&name, &role, &backend, description.as_deref())
             }
             AgentAction::Remove { name } => commands::agent_cmd::remove(&name),
+        },
+        Commands::Workflow { action } => match action {
+            WorkflowAction2::List => commands::workflow_cmd::list(),
+            WorkflowAction2::Validate { name } => commands::workflow_cmd::validate(&name),
         },
     };
 

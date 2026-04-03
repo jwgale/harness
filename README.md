@@ -4,17 +4,23 @@ A CLI tool that orchestrates **planner -> builder -> evaluator** loops using sub
 
 Inspired by [Anthropic's harness architecture](https://www.anthropic.com/engineering/harness-design-long-running-apps) for long-running application development with Opus 4.6.
 
-## v0.4.0 Release Notes
+## v0.5.0 Release Notes
 
-Harness v0.4.0 adds multi-agent orchestration — define agents, compose workflows, and run them sequentially.
+Harness v0.5.0 adds parallel agent execution, iterative build-evaluate loops, and workflow validation.
 
-**New in v0.4.0:**
+**New in v0.5.0:**
+- **Parallel Execution** — `--parallel` flag and `parallel: true` workflow steps run agents concurrently
+- **Iterative Loops** — `loop_until = "pass"` in workflows creates automatic builder+evaluator revision loops
+- **Workflow Validation** — `harness workflow validate <name>` checks agent refs, backends, and structure before running
+- **Workflow Management** — `harness workflow list/validate` commands
+- **24 Integration Tests** — comprehensive test suite including parallel, loop, and validation tests
+
+**v0.4.0:**
 - **Multi-Agent Orchestration** — `harness agent add/list/remove` for TOML-based agent definitions
 - **Named Workflows** — `harness run --workflow <name>` runs TOML-defined agent sequences
 - **Agent CLI** — `harness run --agents planner,builder,evaluator` for ad-hoc multi-agent runs
 - **Custom Roles** — define specialized agents (security reviewer, documentation writer, etc.)
 - **SCL Recording** — all agent runs, steps, and outcomes automatically recorded
-- **20 Integration Tests** — comprehensive test suite
 
 **v0.3.0:**
 - **Custom Evaluators** — `harness evaluator list/use` to switch between evaluation strategies per workspace
@@ -111,6 +117,8 @@ harness evaluate --backend claude
 | `harness agent list` | List defined agents |
 | `harness agent add <name> --role <role> --backend <backend>` | Create a new agent definition |
 | `harness agent remove <name>` | Remove an agent definition |
+| `harness workflow list` | List defined workflows |
+| `harness workflow validate <name>` | Validate a workflow definition |
 
 ### `harness run` options
 
@@ -503,6 +511,51 @@ harness run --agents my-planner,my-builder,my-evaluator --no-tui
 
 Each agent runs in order. Planner agents write `spec.md`, builders write `status.md`, evaluators write `evaluation.md` and return a verdict. Custom agents write their output to `.harness/agent-<name>.md`.
 
+### Parallel Execution
+
+Run agents concurrently with `--parallel`:
+
+```bash
+harness run --agents frontend-builder,backend-builder --parallel --no-tui
+```
+
+In workflows, mark steps as `parallel: true` to run them concurrently:
+
+```toml
+[[steps]]
+agent = "frontend-builder"
+parallel = true
+
+[[steps]]
+agent = "backend-builder"
+parallel = true
+
+[[steps]]
+agent = "my-evaluator"
+# Not parallel — runs after both builders complete
+```
+
+Adjacent `parallel: true` steps form a batch that executes concurrently. Non-parallel steps run after the batch completes.
+
+### Iterative Build-Evaluate Loops
+
+Add `loop_until = "pass"` to a builder step to create an automatic revision loop:
+
+```toml
+[[steps]]
+agent = "my-planner"
+
+[[steps]]
+agent = "my-builder"
+loop_until = "pass"
+max_rounds = 5
+
+[[steps]]
+agent = "my-evaluator"
+```
+
+The builder and evaluator will iterate until the evaluator returns PASS or `max_rounds` is exhausted. This brings the same revision loop from `harness run` into multi-agent workflows.
+
 ### Defining Workflows
 
 Workflows are TOML files in `~/.config/harness/workflows/` that define a sequence of agent steps:
@@ -510,7 +563,7 @@ Workflows are TOML files in `~/.config/harness/workflows/` that define a sequenc
 ```toml
 # ~/.config/harness/workflows/standard.toml
 name = "standard"
-description = "Standard plan-build-evaluate workflow"
+description = "Standard plan-build-evaluate with revision loop"
 max_rounds = 3
 
 [[steps]]
@@ -518,6 +571,7 @@ agent = "my-planner"
 
 [[steps]]
 agent = "my-builder"
+loop_until = "pass"
 
 [[steps]]
 agent = "my-evaluator"
@@ -534,6 +588,24 @@ Steps can override prompts:
 agent = "my-evaluator"
 prompt = "Focus only on security issues in this evaluation."
 ```
+
+### Workflow Validation
+
+Validate workflows before running to catch errors early:
+
+```bash
+# Validate a specific workflow
+harness workflow validate standard
+
+# List all workflows
+harness workflow list
+```
+
+Validation checks:
+- All referenced agents exist
+- Agent backends and roles are valid
+- `loop_until` steps have a subsequent evaluator
+- No structural errors
 
 ### Custom Agents
 
@@ -553,6 +625,8 @@ Custom agents receive the project goal and spec as context, plus any custom prom
 Multi-agent runs automatically record to the Shared Context Layer:
 - Which agents were used in each run
 - Each agent step completion with status
+- Parallel execution groups (start/end)
+- Iterative loop iterations
 - Final run outcome
 
 Example agent and workflow templates are in the `examples/` directory of this repo.
@@ -660,8 +734,15 @@ Harness is evolving from a thin orchestrator into a full local-first agent platf
 - SCL auto-records agent runs, individual steps, and outcomes
 - 20 integration tests passing
 
-**Phase 13: Parallel Execution + Agent Specialization**
-- Parallel builder sessions
+**Phase 13: Parallel Agents + Iterative Loops + Workflow Validation (done)**
+- `harness run --agents a,b --parallel` for concurrent agent execution
+- `parallel: true` workflow steps for concurrent step batches
+- `loop_until = "pass"` for iterative build-evaluate loops in workflows
+- `harness workflow list/validate` for pre-run workflow validation
+- SCL records parallel groups, loop iterations, and outcomes
+- 24 integration tests passing
+
+**Phase 14: Agent Specialization + Cross-Project Learning**
 - Agent specialization (frontend, backend, testing)
 - Cross-project learning via Shared Context Layer
 

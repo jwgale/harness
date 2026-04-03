@@ -1,0 +1,18 @@
+# Example workflow: parallel frontend + backend builds
+# Copy to ~/.config/harness/workflows/
+name = "parallel-build"
+description = "Plan, then build frontend and backend in parallel, then evaluate"
+
+[[steps]]
+agent = "my-planner"
+
+[[steps]]
+agent = "frontend-builder"
+parallel = true
+
+[[steps]]
+agent = "backend-builder"
+parallel = true
+
+[[steps]]
+agent = "my-evaluator"

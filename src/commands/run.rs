@@ -141,140 +141,336 @@ fn update_run_outcome(round: u32, verdict: &Verdict) -> Result<(), String> {
 /// Run a multi-agent workflow, either from --agents list or --workflow name.
 pub fn run_multi_agent(
     backend_override: Option<&str>,
-    max_rounds: Option<u32>,
+    _max_rounds: Option<u32>,
     agents_csv: Option<&str>,
     workflow_name: Option<&str>,
+    parallel: bool,
 ) -> Result<(), String> {
     artifacts::ensure_harness_exists()?;
     let config = Config::load(&artifacts::harness_dir())?;
     let pm = PluginManager::load();
 
-    let (agent_defs, max) = if let Some(wf_name) = workflow_name {
+    if let Some(wf_name) = workflow_name {
         let wf = workflows::load(wf_name)?;
-        let max = wf.max_rounds.unwrap_or(max_rounds.unwrap_or(config.max_eval_rounds));
-        let defs = resolve_workflow_agents(&wf)?;
-        println!("Running workflow '{}' ({} steps)", wf.name, defs.len());
-        (defs, max)
-    } else if let Some(csv) = agents_csv {
+
+        // Validate workflow before running
+        let errors = workflows::validate(&wf);
+        if !errors.is_empty() {
+            println!("Workflow '{}' validation failed:\n", wf.name);
+            for err in &errors {
+                println!("  - {err}");
+            }
+            return Err(format!("Workflow has {} validation error(s)", errors.len()));
+        }
+
+        let groups = workflows::plan_execution(&wf);
+        let agent_names: Vec<String> = wf.steps.iter().map(|s| s.agent.clone()).collect();
+        let name_refs: Vec<&str> = agent_names.iter().map(|s| s.as_str()).collect();
+        scl_lifecycle::record_agent_run_start(&config.project_name, &name_refs);
+
+        println!("Running workflow '{}' ({} groups from {} steps)", wf.name, groups.len(), wf.steps.len());
+
+        let result = run_step_groups(&groups, backend_override, &config, &pm);
+
+        let status = if result.is_ok() { "completed" } else { "FAIL" };
+        scl_lifecycle::record_agent_run_end(&config.project_name, &name_refs, status);
+        println!("\n=== Workflow '{}' {status} ===", wf.name);
+        return result;
+    }
+
+    if let Some(csv) = agents_csv {
         let names: Vec<&str> = csv.split(',').map(|s| s.trim()).collect();
+        // Validate all agents exist before starting
         let defs = resolve_agent_names(&names)?;
-        let max = max_rounds.unwrap_or(config.max_eval_rounds);
-        println!("Running {} agents: {}", defs.len(), csv);
-        (defs, max)
-    } else {
-        return Err("Either --agents or --workflow is required".to_string());
-    };
+        scl_lifecycle::record_agent_run_start(&config.project_name, &names);
 
-    // Record to SCL
-    let agent_names: Vec<&str> = agent_defs.iter().map(|a| a.name.as_str()).collect();
-    scl_lifecycle::record_agent_run_start(&config.project_name, &agent_names);
-
-    let mut last_verdict = None;
-
-    for (step_idx, agent) in agent_defs.iter().enumerate() {
-        let step_num = step_idx + 1;
-        let backend = Backend::from_str(
-            backend_override.unwrap_or(&agent.backend),
-        )?;
-        let model = agent.model.as_deref().unwrap_or(&config.model);
-        let timeout = agent.timeout_seconds.unwrap_or(match agent.role.as_str() {
-            "builder" => config.builder_timeout_seconds,
-            _ => config.evaluator_timeout_seconds,
-        });
-
-        println!("\n--- Step {step_num}/{}: agent '{}' [{}] ---", agent_defs.len(), agent.name, agent.role);
-
-        match agent.role.as_str() {
-            "planner" => {
-                pm.fire(HookPoint::BeforePlan);
-                let prompt = build_agent_prompt(agent, &config)?;
-                let output = cli_backend::run_oneshot(&backend, model, &prompt, timeout)?;
-                artifacts::write_artifact("spec.md", &output)?;
-                pm.fire(HookPoint::AfterPlan);
-                scl_lifecycle::record_agent_step(&config.project_name, &agent.name, "planner", "completed");
-                println!("Plan written to .harness/spec.md");
-            }
-            "builder" => {
-                pm.fire(HookPoint::BeforeBuild);
-                let prompt = build_agent_prompt(agent, &config)?;
-                let output = cli_backend::run_builder(&backend, model, &prompt, timeout)?;
-                artifacts::write_artifact("status.md", &output)?;
-                pm.fire(HookPoint::AfterBuild);
-                scl_lifecycle::record_agent_step(&config.project_name, &agent.name, "builder", "completed");
-                println!("Build complete.");
-            }
-            "evaluator" => {
-                pm.fire(HookPoint::BeforeEvaluate);
-                let prompt = build_agent_prompt(agent, &config)?;
-                let output = cli_backend::run_oneshot(&backend, model, &prompt, timeout)?;
-                artifacts::write_artifact("evaluation.md", &output)?;
-                let fb_round = artifacts::next_feedback_number();
-                artifacts::write_artifact(&format!("feedback/round-{fb_round:03}.md"), &output)?;
-
-                let verdict = evaluate::parse_verdict(&output);
-                pm.fire(HookPoint::AfterEvaluate);
-                scl_lifecycle::record_agent_step(
-                    &config.project_name, &agent.name, "evaluator",
-                    &format!("{verdict:?}"),
-                );
-                notifications::fire_eval_event(&verdict, &config.project_name, fb_round);
-
-                println!("Verdict: {verdict:?}");
-                last_verdict = Some(verdict.clone());
-
-                match verdict {
-                    Verdict::Pass => {
-                        println!("\n=== PASSED (agent '{}') ===", agent.name);
-                    }
-                    Verdict::Fail => {
-                        scl_lifecycle::record_agent_run_end(&config.project_name, &agent_names, "FAIL");
-                        return Err(format!("Agent '{}' returned FAIL verdict", agent.name));
-                    }
-                    Verdict::Revise => {
-                        println!("Revise — continuing to next step.");
-                    }
+        if parallel {
+            println!("Running {} agents in parallel: {csv}", defs.len());
+            let steps: Vec<workflows::WorkflowStep> = defs.iter().map(|a| {
+                workflows::WorkflowStep {
+                    agent: a.name.clone(),
+                    prompt: None,
+                    output_artifact: None,
+                    parallel: true,
+                    loop_until: None,
+                    max_rounds: None,
                 }
+            }).collect();
+            let group = workflows::StepGroup::Parallel(steps);
+            let result = run_step_groups(&[group], backend_override, &config, &pm);
+            let status = if result.is_ok() { "completed" } else { "FAIL" };
+            scl_lifecycle::record_agent_run_end(&config.project_name, &names, status);
+            println!("\n=== Multi-agent run {status} ===");
+            return result;
+        }
+
+        println!("Running {} agents: {csv}", defs.len());
+        let steps: Vec<workflows::WorkflowStep> = defs.iter().map(|a| {
+            workflows::WorkflowStep {
+                agent: a.name.clone(),
+                prompt: None,
+                output_artifact: None,
+                parallel: false,
+                loop_until: None,
+                max_rounds: None,
             }
-            _ => {
-                // Custom role: run as oneshot
-                let prompt = build_agent_prompt(agent, &config)?;
-                let output = cli_backend::run_oneshot(&backend, model, &prompt, timeout)?;
-                // Write output to a named artifact
-                let artifact_name = format!("agent-{}.md", agent.name);
-                artifacts::write_artifact(&artifact_name, &output)?;
-                scl_lifecycle::record_agent_step(&config.project_name, &agent.name, "custom", "completed");
-                println!("Output written to .harness/{artifact_name}");
+        }).collect();
+        let groups: Vec<workflows::StepGroup> = steps.into_iter()
+            .map(workflows::StepGroup::Single)
+            .collect();
+        let result = run_step_groups(&groups, backend_override, &config, &pm);
+        let status = if result.is_ok() { "completed" } else { "FAIL" };
+        scl_lifecycle::record_agent_run_end(&config.project_name, &names, status);
+        println!("\n=== Multi-agent run {status} ===");
+        return result;
+    }
+
+    Err("Either --agents or --workflow is required".to_string())
+}
+
+/// Execute a sequence of step groups.
+fn run_step_groups(
+    groups: &[workflows::StepGroup],
+    backend_override: Option<&str>,
+    config: &Config,
+    pm: &PluginManager,
+) -> Result<(), String> {
+    for (gi, group) in groups.iter().enumerate() {
+        match group {
+            workflows::StepGroup::Single(step) => {
+                println!("\n--- Group {}/{}: agent '{}' ---", gi + 1, groups.len(), step.agent);
+                run_single_step(step, backend_override, config, pm)?;
+            }
+            workflows::StepGroup::Parallel(steps) => {
+                let names: Vec<&str> = steps.iter().map(|s| s.agent.as_str()).collect();
+                println!("\n--- Group {}/{}: parallel [{}] ---", gi + 1, groups.len(), names.join(", "));
+                scl_lifecycle::record_parallel_start(&config.project_name, &names);
+                run_parallel_steps(steps, backend_override, config, pm)?;
+                scl_lifecycle::record_parallel_end(&config.project_name, &names);
+            }
+            workflows::StepGroup::Loop { body, evaluator, max_rounds } => {
+                let body_names: Vec<&str> = body.iter().map(|s| s.agent.as_str()).collect();
+                println!(
+                    "\n--- Group {}/{}: loop [{}] -> evaluator '{}' (max {max_rounds} rounds) ---",
+                    gi + 1, groups.len(), body_names.join(", "), evaluator.agent
+                );
+                run_iterative_loop(body, evaluator, *max_rounds, backend_override, config, pm)?;
             }
         }
     }
+    Ok(())
+}
 
-    let final_status = match &last_verdict {
-        Some(Verdict::Pass) => "PASS",
-        Some(Verdict::Fail) => "FAIL",
-        _ => "completed",
-    };
-    scl_lifecycle::record_agent_run_end(&config.project_name, &agent_names, final_status);
+/// Run a single step.
+fn run_single_step(
+    step: &workflows::WorkflowStep,
+    backend_override: Option<&str>,
+    config: &Config,
+    pm: &PluginManager,
+) -> Result<Option<Verdict>, String> {
+    let mut agent = agents::load(&step.agent)?;
+    if step.prompt.is_some() {
+        agent.prompt_template = step.prompt.clone();
+    }
 
-    let _ = max; // max_rounds available for future iterative multi-agent loops
-    println!("\n=== Multi-agent run complete ({final_status}) ===");
+    let backend = Backend::from_str(backend_override.unwrap_or(&agent.backend))?;
+    let model = agent.model.as_deref().unwrap_or(&config.model);
+    let timeout = agent.timeout_seconds.unwrap_or(match agent.role.as_str() {
+        "builder" => config.builder_timeout_seconds,
+        _ => config.evaluator_timeout_seconds,
+    });
+
+    match agent.role.as_str() {
+        "planner" => {
+            pm.fire(HookPoint::BeforePlan);
+            let prompt = build_agent_prompt(&agent, config)?;
+            let output = cli_backend::run_oneshot(&backend, model, &prompt, timeout)?;
+            artifacts::write_artifact("spec.md", &output)?;
+            pm.fire(HookPoint::AfterPlan);
+            scl_lifecycle::record_agent_step(&config.project_name, &agent.name, "planner", "completed");
+            println!("  Plan written to .harness/spec.md");
+            Ok(None)
+        }
+        "builder" => {
+            pm.fire(HookPoint::BeforeBuild);
+            let prompt = build_agent_prompt(&agent, config)?;
+            let output = cli_backend::run_builder(&backend, model, &prompt, timeout)?;
+            artifacts::write_artifact("status.md", &output)?;
+            pm.fire(HookPoint::AfterBuild);
+            scl_lifecycle::record_agent_step(&config.project_name, &agent.name, "builder", "completed");
+            println!("  Build complete.");
+            Ok(None)
+        }
+        "evaluator" => {
+            pm.fire(HookPoint::BeforeEvaluate);
+            let prompt = build_agent_prompt(&agent, config)?;
+            let output = cli_backend::run_oneshot(&backend, model, &prompt, timeout)?;
+            artifacts::write_artifact("evaluation.md", &output)?;
+            let fb_round = artifacts::next_feedback_number();
+            artifacts::write_artifact(&format!("feedback/round-{fb_round:03}.md"), &output)?;
+
+            let verdict = evaluate::parse_verdict(&output);
+            pm.fire(HookPoint::AfterEvaluate);
+            scl_lifecycle::record_agent_step(
+                &config.project_name, &agent.name, "evaluator",
+                &format!("{verdict:?}"),
+            );
+            notifications::fire_eval_event(&verdict, &config.project_name, fb_round);
+            println!("  Verdict: {verdict:?}");
+
+            match &verdict {
+                Verdict::Pass => println!("  PASSED"),
+                Verdict::Fail => {
+                    return Err(format!("Agent '{}' returned FAIL verdict", agent.name));
+                }
+                Verdict::Revise => println!("  Revise requested."),
+            }
+            Ok(Some(verdict))
+        }
+        _ => {
+            let prompt = build_agent_prompt(&agent, config)?;
+            let output = cli_backend::run_oneshot(&backend, model, &prompt, timeout)?;
+            let default_artifact = format!("agent-{}.md", agent.name);
+            let artifact_name = step.output_artifact.as_deref()
+                .unwrap_or(&default_artifact);
+            artifacts::write_artifact(artifact_name, &output)?;
+            scl_lifecycle::record_agent_step(&config.project_name, &agent.name, "custom", "completed");
+            println!("  Output written to .harness/{artifact_name}");
+            Ok(None)
+        }
+    }
+}
+
+/// Run steps in parallel using std::thread.
+fn run_parallel_steps(
+    steps: &[workflows::WorkflowStep],
+    backend_override: Option<&str>,
+    config: &Config,
+    _pm: &PluginManager,
+) -> Result<(), String> {
+    let mut handles = Vec::new();
+
+    for step in steps {
+        let step = step.clone();
+        let agent_name = step.agent.clone();
+        let backend_str = backend_override.map(|s| s.to_string());
+        let config = config.clone();
+
+        let handle = std::thread::spawn(move || -> Result<(), String> {
+            let mut agent = agents::load(&step.agent)?;
+            if step.prompt.is_some() {
+                agent.prompt_template = step.prompt.clone();
+            }
+
+            let backend = Backend::from_str(
+                backend_str.as_deref().unwrap_or(&agent.backend),
+            )?;
+            let model_owned = agent.model.clone().unwrap_or_else(|| config.model.clone());
+            let timeout = agent.timeout_seconds.unwrap_or(match agent.role.as_str() {
+                "builder" => config.builder_timeout_seconds,
+                _ => config.evaluator_timeout_seconds,
+            });
+
+            let prompt = build_agent_prompt(&agent, &config)?;
+
+            let output = if agent.role == "builder" {
+                cli_backend::run_builder(&backend, &model_owned, &prompt, timeout)?
+            } else {
+                cli_backend::run_oneshot(&backend, &model_owned, &prompt, timeout)?
+            };
+
+            // Write output to appropriate artifact
+            let artifact = match agent.role.as_str() {
+                "planner" => "spec.md".to_string(),
+                "builder" => "status.md".to_string(),
+                "evaluator" => "evaluation.md".to_string(),
+                _ => step.output_artifact.unwrap_or_else(|| format!("agent-{}.md", agent.name)),
+            };
+            artifacts::write_artifact(&artifact, &output)?;
+            scl_lifecycle::record_agent_step(&config.project_name, &agent.name, &agent.role, "completed");
+            eprintln!("  [parallel] agent '{}' [{}] complete -> .harness/{artifact}", agent.name, agent.role);
+
+            Ok(())
+        });
+        handles.push((agent_name, handle));
+    }
+
+    // Collect results
+    let mut errors = Vec::new();
+    for (name, handle) in handles {
+        match handle.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => errors.push(format!("agent '{name}': {e}")),
+            Err(_) => errors.push(format!("agent '{name}': thread panicked")),
+        }
+    }
+
+    if errors.is_empty() {
+        println!("  All parallel agents completed.");
+        Ok(())
+    } else {
+        Err(format!("Parallel execution failed:\n  {}", errors.join("\n  ")))
+    }
+}
+
+/// Run an iterative build-evaluate loop.
+fn run_iterative_loop(
+    body: &[workflows::WorkflowStep],
+    evaluator_step: &workflows::WorkflowStep,
+    max_rounds: u32,
+    backend_override: Option<&str>,
+    config: &Config,
+    pm: &PluginManager,
+) -> Result<(), String> {
+    for round in 1..=max_rounds {
+        println!("\n  === Iteration {round}/{max_rounds} ===");
+
+        // Run body steps (builder(s) and any other steps)
+        for step in body {
+            run_single_step(step, backend_override, config, pm)?;
+        }
+
+        // Run evaluator
+        let verdict = run_single_step(evaluator_step, backend_override, config, pm)?;
+
+        scl_lifecycle::record_loop_iteration(&config.project_name, round, max_rounds);
+
+        match verdict {
+            Some(Verdict::Pass) => {
+                println!("  Loop completed: PASS on round {round}");
+                return Ok(());
+            }
+            Some(Verdict::Fail) => {
+                return Err(format!("Loop failed: FAIL on round {round}"));
+            }
+            Some(Verdict::Revise) => {
+                if round == max_rounds {
+                    return Err(format!(
+                        "Loop exhausted: {max_rounds} rounds without PASS. Last verdict: REVISE"
+                    ));
+                }
+                println!("  Revise — looping back (round {}/{max_rounds})", round + 1);
+            }
+            None => {
+                // Evaluator didn't return a verdict somehow
+                println!("  Warning: evaluator did not return a verdict.");
+            }
+        }
+    }
     Ok(())
 }
 
 /// Build the prompt for an agent step.
 fn build_agent_prompt(agent: &AgentDef, config: &Config) -> Result<String, String> {
-    // If the agent has a custom prompt template, use it
     if let Some(template) = &agent.prompt_template {
-        // Check if it's a file path
         let path = std::path::Path::new(template);
         if path.exists() {
             return std::fs::read_to_string(path)
                 .map_err(|e| format!("Failed to read prompt template '{}': {e}", template));
         }
-        // Otherwise use as inline prompt
         return Ok(template.clone());
     }
 
-    // Default: use the built-in prompts for known roles
     match agent.role.as_str() {
         "planner" => {
             let goal = artifacts::read_artifact("goal.md")?;
@@ -283,7 +479,6 @@ fn build_agent_prompt(agent: &AgentDef, config: &Config) -> Result<String, Strin
         "builder" => prompts::builder_prompt(),
         "evaluator" => prompts::evaluator_prompt(),
         _ => {
-            // Custom role with no template — provide minimal context
             let goal = artifacts::read_artifact("goal.md").unwrap_or_default();
             let spec = artifacts::read_artifact("spec.md").unwrap_or_default();
             Ok(format!(
@@ -292,20 +487,6 @@ fn build_agent_prompt(agent: &AgentDef, config: &Config) -> Result<String, Strin
             ))
         }
     }
-}
-
-/// Resolve a workflow's steps into agent definitions.
-fn resolve_workflow_agents(wf: &workflows::WorkflowDef) -> Result<Vec<AgentDef>, String> {
-    let mut defs = Vec::new();
-    for step in &wf.steps {
-        let mut agent = agents::load(&step.agent)?;
-        // Apply step-level prompt override if present
-        if step.prompt.is_some() {
-            agent.prompt_template = step.prompt.clone();
-        }
-        defs.push(agent);
-    }
-    Ok(defs)
 }
 
 /// Resolve a comma-separated list of agent names into definitions.

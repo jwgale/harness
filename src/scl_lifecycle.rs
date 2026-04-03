@@ -59,6 +59,29 @@ pub fn record_agent_run_end(project: &str, agents: &[&str], outcome: &str) {
     ));
 }
 
+/// Record start of a parallel step group.
+pub fn record_parallel_start(project: &str, agents: &[&str]) {
+    let names = agents.join(", ");
+    auto_record("active_work", &format!(
+        "Parallel execution started for {project}: [{names}]"
+    ));
+}
+
+/// Record end of a parallel step group.
+pub fn record_parallel_end(project: &str, agents: &[&str]) {
+    let names = agents.join(", ");
+    auto_record("active_work", &format!(
+        "Parallel execution completed for {project}: [{names}]"
+    ));
+}
+
+/// Record a loop iteration.
+pub fn record_loop_iteration(project: &str, round: u32, max: u32) {
+    auto_record("active_work", &format!(
+        "Build-evaluate loop iteration {round}/{max} for {project}"
+    ));
+}
+
 fn auto_record(entry_type: &str, content: &str) {
     let gc = GlobalConfig::load();
     let Some(scl_cfg) = gc.scl() else { return };

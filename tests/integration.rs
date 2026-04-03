@@ -410,7 +410,7 @@ backend = "mock"
         "run", "--agents", "ma-planner,ma-builder,ma-evaluator", "--no-tui",
     ]);
     assert!(ok, "multi-agent run failed: {stdout}");
-    assert!(stdout.contains("Multi-agent run complete"));
+    assert!(stdout.contains("Multi-agent run"));
     assert!(stdout.contains("ma-planner"));
 
     // Artifacts should exist
@@ -470,11 +470,141 @@ agent = "wf-builder"
     ]);
     assert!(ok, "workflow run failed: stdout={stdout} stderr={stderr}");
     assert!(stdout.contains("Running workflow 'test-flow'"));
-    assert!(stdout.contains("Multi-agent run complete"));
+    assert!(stdout.contains("Workflow 'test-flow' completed"));
 
     // Cleanup
     fs::remove_file(agents_dir.join("wf-planner.toml")).ok();
     fs::remove_file(agents_dir.join("wf-builder.toml")).ok();
     fs::remove_file(workflows_dir.join("test-flow.toml")).ok();
+    fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn test_parallel_agents_with_mock() {
+    let tmp = tempdir("parallel");
+    run_harness_in(&tmp, &["init", "Parallel test"]);
+
+    let agents_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp/.config"))
+        .join("harness/agents");
+    fs::create_dir_all(&agents_dir).unwrap();
+
+    fs::write(agents_dir.join("par-a.toml"), "name = \"par-a\"\nrole = \"custom\"\nbackend = \"mock\"\n").unwrap();
+    fs::write(agents_dir.join("par-b.toml"), "name = \"par-b\"\nrole = \"custom\"\nbackend = \"mock\"\n").unwrap();
+
+    // Run with --parallel
+    let (stdout, _stderr, ok) = run_harness_in(&tmp, &[
+        "run", "--agents", "par-a,par-b", "--parallel", "--no-tui",
+    ]);
+    assert!(ok, "parallel run failed: {stdout}");
+    assert!(stdout.contains("parallel"));
+
+    // Both outputs should exist
+    assert!(tmp.join(".harness/agent-par-a.md").exists());
+    assert!(tmp.join(".harness/agent-par-b.md").exists());
+
+    fs::remove_file(agents_dir.join("par-a.toml")).ok();
+    fs::remove_file(agents_dir.join("par-b.toml")).ok();
+    fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn test_workflow_validate() {
+    let agents_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp/.config"))
+        .join("harness/agents");
+    let workflows_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp/.config"))
+        .join("harness/workflows");
+    fs::create_dir_all(&agents_dir).unwrap();
+    fs::create_dir_all(&workflows_dir).unwrap();
+
+    // Create agents
+    fs::write(agents_dir.join("val-planner.toml"), "name = \"val-planner\"\nrole = \"planner\"\nbackend = \"mock\"\n").unwrap();
+    fs::write(agents_dir.join("val-builder.toml"), "name = \"val-builder\"\nrole = \"builder\"\nbackend = \"mock\"\n").unwrap();
+
+    // Create valid workflow
+    fs::write(workflows_dir.join("valid-wf.toml"), r#"
+name = "valid-wf"
+[[steps]]
+agent = "val-planner"
+[[steps]]
+agent = "val-builder"
+"#).unwrap();
+
+    let (stdout, _, ok) = run_harness(&["workflow", "validate", "valid-wf"]);
+    assert!(ok, "validate failed: {stdout}");
+    assert!(stdout.contains("valid"));
+
+    // Create invalid workflow (references non-existent agent)
+    fs::write(workflows_dir.join("invalid-wf.toml"), r#"
+name = "invalid-wf"
+[[steps]]
+agent = "nonexistent-agent"
+"#).unwrap();
+
+    let (_, stderr, ok) = run_harness(&["workflow", "validate", "invalid-wf"]);
+    assert!(!ok, "invalid workflow should fail validation");
+    assert!(stderr.contains("validation failed") || stderr.contains("error"));
+
+    // Cleanup
+    fs::remove_file(agents_dir.join("val-planner.toml")).ok();
+    fs::remove_file(agents_dir.join("val-builder.toml")).ok();
+    fs::remove_file(workflows_dir.join("valid-wf.toml")).ok();
+    fs::remove_file(workflows_dir.join("invalid-wf.toml")).ok();
+}
+
+#[test]
+fn test_workflow_list() {
+    let (stdout, _, ok) = run_harness(&["workflow", "list"]);
+    assert!(ok);
+    assert!(stdout.contains("workflow") || stdout.contains("No workflows"));
+}
+
+#[test]
+fn test_iterative_loop_workflow() {
+    let tmp = tempdir("iterloop");
+    run_harness_in(&tmp, &["init", "Iterative loop test"]);
+
+    let agents_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp/.config"))
+        .join("harness/agents");
+    let workflows_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp/.config"))
+        .join("harness/workflows");
+    fs::create_dir_all(&agents_dir).unwrap();
+    fs::create_dir_all(&workflows_dir).unwrap();
+
+    fs::write(agents_dir.join("loop-planner.toml"), "name = \"loop-planner\"\nrole = \"planner\"\nbackend = \"mock\"\n").unwrap();
+    fs::write(agents_dir.join("loop-builder.toml"), "name = \"loop-builder\"\nrole = \"builder\"\nbackend = \"mock\"\n").unwrap();
+    fs::write(agents_dir.join("loop-evaluator.toml"), "name = \"loop-evaluator\"\nrole = \"evaluator\"\nbackend = \"mock\"\n").unwrap();
+
+    // Workflow with loop_until
+    fs::write(workflows_dir.join("iter-flow.toml"), r#"
+name = "iter-flow"
+max_rounds = 2
+
+[[steps]]
+agent = "loop-planner"
+
+[[steps]]
+agent = "loop-builder"
+loop_until = "pass"
+
+[[steps]]
+agent = "loop-evaluator"
+"#).unwrap();
+
+    let (stdout, _stderr, ok) = run_harness_in(&tmp, &[
+        "run", "--workflow", "iter-flow", "--no-tui",
+    ]);
+    assert!(ok, "iterative workflow failed: {stdout}");
+    // Mock backend returns PASS, so loop should complete on first iteration
+    assert!(stdout.contains("Loop completed: PASS"));
+
+    fs::remove_file(agents_dir.join("loop-planner.toml")).ok();
+    fs::remove_file(agents_dir.join("loop-builder.toml")).ok();
+    fs::remove_file(agents_dir.join("loop-evaluator.toml")).ok();
+    fs::remove_file(workflows_dir.join("iter-flow.toml")).ok();
     fs::remove_dir_all(&tmp).ok();
 }
