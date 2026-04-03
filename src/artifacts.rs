@@ -86,6 +86,43 @@ pub fn next_feedback_number() -> u32 {
     max + 1
 }
 
+/// Write an artifact namespaced to a specific agent (for parallel isolation).
+/// Writes to .harness/agents/<agent_name>/<artifact_name>.
+pub fn write_agent_artifact(agent_name: &str, artifact_name: &str, content: &str) -> Result<(), String> {
+    let path = harness_dir().join("agents").join(agent_name).join(artifact_name);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create agent dir for {agent_name}: {e}"))?;
+    }
+    fs::write(&path, content)
+        .map_err(|e| format!("Failed to write agents/{agent_name}/{artifact_name}: {e}"))
+}
+
+/// Read an agent-namespaced artifact.
+pub fn read_agent_artifact(agent_name: &str, artifact_name: &str) -> Result<String, String> {
+    let path = harness_dir().join("agents").join(agent_name).join(artifact_name);
+    fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read agents/{agent_name}/{artifact_name}: {e}"))
+}
+
+/// Merge agent-namespaced artifacts into the shared artifact location.
+/// Appends each agent's output with a header.
+pub fn merge_agent_artifacts(agent_names: &[&str], artifact_name: &str) -> Result<(), String> {
+    let mut merged = String::new();
+    for name in agent_names {
+        if let Ok(content) = read_agent_artifact(name, artifact_name) {
+            if !merged.is_empty() {
+                merged.push_str("\n\n---\n\n");
+            }
+            merged.push_str(&format!("# Agent: {name}\n\n{content}"));
+        }
+    }
+    if !merged.is_empty() {
+        write_artifact(artifact_name, &merged)?;
+    }
+    Ok(())
+}
+
 pub fn list_project_files() -> String {
     let mut files = Vec::new();
     collect_files(Path::new("."), &mut files);

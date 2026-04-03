@@ -102,6 +102,45 @@ pub fn render(
         Span::styled(format_elapsed(elapsed_secs), Style::default().fg(Color::White)),
     ]));
 
+    // Multi-agent info
+    match phase {
+        TuiPhase::Parallel(names) => {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  ── Parallel Agents ──",
+                Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+            )));
+            for name in names {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled("⟩ ", Style::default().fg(Color::Blue)),
+                    Span::styled(name.clone(), Style::default().fg(Color::White)),
+                ]));
+            }
+        }
+        TuiPhase::Loop { round: lr, max: lm } => {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("  Loop:    ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("iteration {lr}/{lm}"),
+                    Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
+        TuiPhase::AgentStep(name, role) => {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("  Agent:   ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{name} [{role}]"),
+                    Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
+        _ => {}
+    }
+
     // Features
     if !features.is_empty() {
         lines.push(Line::from(""));

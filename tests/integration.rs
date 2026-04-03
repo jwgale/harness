@@ -499,9 +499,9 @@ fn test_parallel_agents_with_mock() {
     assert!(ok, "parallel run failed: {stdout}");
     assert!(stdout.contains("parallel"));
 
-    // Both outputs should exist
-    assert!(tmp.join(".harness/agent-par-a.md").exists());
-    assert!(tmp.join(".harness/agent-par-b.md").exists());
+    // Both agent-namespaced outputs should exist
+    assert!(tmp.join(".harness/agents/par-a/output.md").exists());
+    assert!(tmp.join(".harness/agents/par-b/output.md").exists());
 
     fs::remove_file(agents_dir.join("par-a.toml")).ok();
     fs::remove_file(agents_dir.join("par-b.toml")).ok();
@@ -606,5 +606,41 @@ agent = "loop-evaluator"
     fs::remove_file(agents_dir.join("loop-builder.toml")).ok();
     fs::remove_file(agents_dir.join("loop-evaluator.toml")).ok();
     fs::remove_file(workflows_dir.join("iter-flow.toml")).ok();
+    fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn test_parallel_artifact_isolation() {
+    let tmp = tempdir("artisolation");
+    run_harness_in(&tmp, &["init", "Artifact isolation test"]);
+
+    let agents_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp/.config"))
+        .join("harness/agents");
+    fs::create_dir_all(&agents_dir).unwrap();
+
+    // Two builders running in parallel — should get isolated artifacts
+    fs::write(agents_dir.join("iso-a.toml"), "name = \"iso-a\"\nrole = \"builder\"\nbackend = \"mock\"\n").unwrap();
+    fs::write(agents_dir.join("iso-b.toml"), "name = \"iso-b\"\nrole = \"builder\"\nbackend = \"mock\"\n").unwrap();
+
+    // Create a spec.md so builders have something to work with
+    fs::write(tmp.join(".harness/spec.md"), "# Test Spec\nBuild something.").unwrap();
+
+    let (stdout, stderr, ok) = run_harness_in(&tmp, &[
+        "run", "--agents", "iso-a,iso-b", "--parallel", "--no-tui",
+    ]);
+    assert!(ok, "parallel isolation run failed: {stdout} {stderr}");
+
+    // Each builder should have its own isolated status.md
+    assert!(tmp.join(".harness/agents/iso-a/status.md").exists());
+    assert!(tmp.join(".harness/agents/iso-b/status.md").exists());
+
+    // Merged status.md should also exist in the shared location
+    assert!(tmp.join(".harness/status.md").exists());
+    let merged = fs::read_to_string(tmp.join(".harness/status.md")).unwrap();
+    assert!(merged.contains("Agent: iso-a") || merged.contains("Agent: iso-b"));
+
+    fs::remove_file(agents_dir.join("iso-a.toml")).ok();
+    fs::remove_file(agents_dir.join("iso-b.toml")).ok();
     fs::remove_dir_all(&tmp).ok();
 }

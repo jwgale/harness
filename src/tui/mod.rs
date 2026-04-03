@@ -34,15 +34,24 @@ pub enum TuiPhase {
     Build,
     Evaluate,
     Done,
+    /// Multi-agent: parallel batch running
+    Parallel(Vec<String>),
+    /// Multi-agent: iterative loop
+    Loop { round: u32, max: u32 },
+    /// Multi-agent: named agent step
+    AgentStep(String, String), // (agent_name, role)
 }
 
 impl TuiPhase {
-    pub fn label(&self) -> &str {
+    pub fn label(&self) -> String {
         match self {
-            TuiPhase::Plan => "PLAN",
-            TuiPhase::Build => "BUILD",
-            TuiPhase::Evaluate => "EVALUATE",
-            TuiPhase::Done => "DONE",
+            TuiPhase::Plan => "PLAN".to_string(),
+            TuiPhase::Build => "BUILD".to_string(),
+            TuiPhase::Evaluate => "EVALUATE".to_string(),
+            TuiPhase::Done => "DONE".to_string(),
+            TuiPhase::Parallel(names) => format!("PARALLEL [{}]", names.join(", ")),
+            TuiPhase::Loop { round, max } => format!("LOOP {round}/{max}"),
+            TuiPhase::AgentStep(name, role) => format!("AGENT '{name}' [{role}]"),
         }
     }
 
@@ -52,6 +61,9 @@ impl TuiPhase {
             TuiPhase::Build => Color::Yellow,
             TuiPhase::Evaluate => Color::Magenta,
             TuiPhase::Done => Color::Green,
+            TuiPhase::Parallel(_) => Color::Blue,
+            TuiPhase::Loop { .. } => Color::LightYellow,
+            TuiPhase::AgentStep(_, _) => Color::LightCyan,
         }
     }
 }
@@ -436,4 +448,178 @@ fn update_run_outcome(round: u32, verdict: &evaluate::Verdict) -> Result<(), Str
         artifacts::write_artifact(&path, &json)?;
     }
     Ok(())
+}
+
+/// Run multi-agent workflow with TUI display.
+/// Runs the multi-agent logic in a background thread while showing progress.
+pub fn run_multi_agent_tui(
+    backend_override: Option<&str>,
+    agents_csv: Option<&str>,
+    workflow_name: Option<&str>,
+    parallel: bool,
+) -> Result<(), String> {
+    artifacts::ensure_harness_exists()?;
+    let config = Config::load(&artifacts::harness_dir())?;
+    let project_name = config.project_name.clone();
+    let backend_name = backend_override.unwrap_or(&config.backend).to_string();
+
+    let features = spec_parser::parse_features();
+
+    let (tx, rx) = mpsc::channel::<TuiEvent>();
+
+    // Capture params for the background thread
+    let tx_clone = tx.clone();
+    let backend_str = backend_override.map(|s| s.to_string());
+    let agents_str = agents_csv.map(|s| s.to_string());
+    let workflow_str = workflow_name.map(|s| s.to_string());
+
+    std::thread::spawn(move || {
+        // Redirect eprintln output to TUI by running the plain multi-agent logic
+        // and sending phase updates through the channel
+        let result = run_multi_agent_with_events(
+            backend_str.as_deref(),
+            agents_str.as_deref(),
+            workflow_str.as_deref(),
+            parallel,
+            &tx_clone,
+        );
+        let _ = tx_clone.send(TuiEvent::RunFinished(
+            result.map(|_| "Multi-agent run complete".to_string())
+        ));
+    });
+
+    // Setup terminal
+    terminal::enable_raw_mode()
+        .map_err(|e| format!("Failed to enable raw mode: {e}"))?;
+    let mut stdout = std::io::stdout();
+    stdout.execute(EnterAlternateScreen)
+        .map_err(|e| format!("Failed to enter alternate screen: {e}"))?;
+    let backend_term = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend_term)
+        .map_err(|e| format!("Failed to create terminal: {e}"))?;
+
+    let mut features = features;
+    let result = tui_event_loop(
+        &mut terminal, &rx, &project_name, &backend_name,
+        0, &mut features,
+    );
+
+    terminal::disable_raw_mode().ok();
+    terminal.backend_mut().execute(LeaveAlternateScreen).ok();
+
+    result
+}
+
+/// Run multi-agent logic while sending TUI events for phase tracking.
+fn run_multi_agent_with_events(
+    backend_override: Option<&str>,
+    agents_csv: Option<&str>,
+    workflow_name: Option<&str>,
+    parallel: bool,
+    tx: &mpsc::Sender<TuiEvent>,
+) -> Result<(), String> {
+    use crate::agents;
+    use crate::commands::run::run_step_groups;
+    use crate::scl_lifecycle;
+    use crate::workflows;
+
+    artifacts::ensure_harness_exists()?;
+    let config = Config::load(&artifacts::harness_dir())?;
+
+    // Route plugin output into TUI
+    let hook_tx = tx.clone();
+    let (plugin_tx, plugin_rx) = mpsc::channel::<String>();
+    let pm = PluginManager::load_with_channel(plugin_tx);
+    std::thread::spawn(move || {
+        for line in plugin_rx {
+            let _ = hook_tx.send(TuiEvent::OutputLine(line));
+        }
+    });
+
+    if let Some(wf_name) = workflow_name {
+        let wf = workflows::load(wf_name)?;
+        let errors = workflows::validate(&wf);
+        if !errors.is_empty() {
+            return Err(format!("Workflow has {} validation error(s)", errors.len()));
+        }
+
+        let groups = workflows::plan_execution(&wf);
+        let agent_names: Vec<String> = wf.steps.iter().map(|s| s.agent.clone()).collect();
+        let name_refs: Vec<&str> = agent_names.iter().map(|s| s.as_str()).collect();
+        scl_lifecycle::record_agent_run_start(&config.project_name, &name_refs);
+
+        let _ = tx.send(TuiEvent::OutputLine(
+            format!("Running workflow '{}' ({} groups)", wf.name, groups.len())
+        ));
+
+        // Send phase events as we progress through groups
+        for (gi, group) in groups.iter().enumerate() {
+            match group {
+                workflows::StepGroup::Single(step) => {
+                    if let Ok(agent) = agents::load(&step.agent) {
+                        let _ = tx.send(TuiEvent::PhaseChange(
+                            TuiPhase::AgentStep(agent.name.clone(), agent.role.clone()), (gi + 1) as u32
+                        ));
+                    }
+                }
+                workflows::StepGroup::Parallel(steps) => {
+                    let names: Vec<String> = steps.iter().map(|s| s.agent.clone()).collect();
+                    let _ = tx.send(TuiEvent::PhaseChange(
+                        TuiPhase::Parallel(names), (gi + 1) as u32
+                    ));
+                }
+                workflows::StepGroup::Loop { max_rounds, .. } => {
+                    let _ = tx.send(TuiEvent::PhaseChange(
+                        TuiPhase::Loop { round: 1, max: *max_rounds }, (gi + 1) as u32
+                    ));
+                }
+            }
+            let _ = tx.send(TuiEvent::OutputLine(format!("--- Group {}/{} ---", gi + 1, groups.len())));
+        }
+
+        // Reset to first group and actually run
+        let _ = tx.send(TuiEvent::PhaseChange(TuiPhase::Plan, 0));
+        let result = run_step_groups(&groups, backend_override, &config, &pm);
+
+        let status = if result.is_ok() { "completed" } else { "FAIL" };
+        scl_lifecycle::record_agent_run_end(&config.project_name, &name_refs, status);
+        let _ = tx.send(TuiEvent::PhaseChange(TuiPhase::Done, 0));
+        return result;
+    }
+
+    if let Some(csv) = agents_csv {
+        let names: Vec<&str> = csv.split(',').map(|s| s.trim()).collect();
+        let defs = crate::commands::run::resolve_agent_names(&names)?;
+        scl_lifecycle::record_agent_run_start(&config.project_name, &names);
+
+        if parallel {
+            let names_owned: Vec<String> = defs.iter().map(|a| a.name.clone()).collect();
+            let _ = tx.send(TuiEvent::PhaseChange(TuiPhase::Parallel(names_owned), 1));
+        }
+
+        let steps: Vec<workflows::WorkflowStep> = defs.iter().map(|a| {
+            workflows::WorkflowStep {
+                agent: a.name.clone(),
+                prompt: None,
+                output_artifact: None,
+                parallel,
+                loop_until: None,
+                max_rounds: None,
+            }
+        }).collect();
+
+        let groups: Vec<workflows::StepGroup> = if parallel {
+            vec![workflows::StepGroup::Parallel(steps)]
+        } else {
+            steps.into_iter().map(workflows::StepGroup::Single).collect()
+        };
+
+        let result = run_step_groups(&groups, backend_override, &config, &pm);
+        let status = if result.is_ok() { "completed" } else { "FAIL" };
+        scl_lifecycle::record_agent_run_end(&config.project_name, &names, status);
+        let _ = tx.send(TuiEvent::PhaseChange(TuiPhase::Done, 0));
+        return result;
+    }
+
+    Err("Either --agents or --workflow is required".to_string())
 }

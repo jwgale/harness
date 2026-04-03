@@ -145,7 +145,15 @@ pub fn run_multi_agent(
     agents_csv: Option<&str>,
     workflow_name: Option<&str>,
     parallel: bool,
+    no_tui: bool,
 ) -> Result<(), String> {
+    // If TUI enabled, delegate to the TUI wrapper
+    if !no_tui {
+        return crate::tui::run_multi_agent_tui(
+            backend_override, agents_csv, workflow_name, parallel,
+        );
+    }
+
     artifacts::ensure_harness_exists()?;
     let config = Config::load(&artifacts::harness_dir())?;
     let pm = PluginManager::load();
@@ -229,7 +237,7 @@ pub fn run_multi_agent(
 }
 
 /// Execute a sequence of step groups.
-fn run_step_groups(
+pub fn run_step_groups(
     groups: &[workflows::StepGroup],
     backend_override: Option<&str>,
     config: &Config,
@@ -341,14 +349,29 @@ fn run_single_step(
     }
 }
 
-/// Run steps in parallel using std::thread.
+/// Run steps in parallel using std::thread with artifact isolation.
 fn run_parallel_steps(
     steps: &[workflows::WorkflowStep],
     backend_override: Option<&str>,
     config: &Config,
-    _pm: &PluginManager,
+    pm: &PluginManager,
 ) -> Result<(), String> {
     let mut handles = Vec::new();
+
+    // Determine hook points from the first step's role for a rough match
+    let hook_roles: Vec<String> = steps.iter()
+        .filter_map(|s| agents::load(&s.agent).ok().map(|a| a.role))
+        .collect();
+
+    // Fire before hooks for the batch
+    for role in &hook_roles {
+        match role.as_str() {
+            "planner" => pm.fire(HookPoint::BeforePlan),
+            "builder" => pm.fire(HookPoint::BeforeBuild),
+            "evaluator" => pm.fire(HookPoint::BeforeEvaluate),
+            _ => {}
+        }
+    }
 
     for step in steps {
         let step = step.clone();
@@ -379,16 +402,22 @@ fn run_parallel_steps(
                 cli_backend::run_oneshot(&backend, &model_owned, &prompt, timeout)?
             };
 
-            // Write output to appropriate artifact
+            // Write to isolated agent namespace
             let artifact = match agent.role.as_str() {
-                "planner" => "spec.md".to_string(),
-                "builder" => "status.md".to_string(),
-                "evaluator" => "evaluation.md".to_string(),
-                _ => step.output_artifact.unwrap_or_else(|| format!("agent-{}.md", agent.name)),
+                "planner" => "spec.md",
+                "builder" => "status.md",
+                "evaluator" => "evaluation.md",
+                _ => "output.md",
             };
-            artifacts::write_artifact(&artifact, &output)?;
+            artifacts::write_agent_artifact(&agent.name, artifact, &output)?;
+
+            // Also write to custom output_artifact if specified
+            if let Some(ref custom) = step.output_artifact {
+                artifacts::write_artifact(custom, &output)?;
+            }
+
             scl_lifecycle::record_agent_step(&config.project_name, &agent.name, &agent.role, "completed");
-            eprintln!("  [parallel] agent '{}' [{}] complete -> .harness/{artifact}", agent.name, agent.role);
+            eprintln!("  [parallel] agent '{}' [{}] -> .harness/agents/{}/{artifact}", agent.name, agent.role, agent.name);
 
             Ok(())
         });
@@ -397,6 +426,7 @@ fn run_parallel_steps(
 
     // Collect results
     let mut errors = Vec::new();
+    let completed_names: Vec<String> = handles.iter().map(|(n, _)| n.clone()).collect();
     for (name, handle) in handles {
         match handle.join() {
             Ok(Ok(())) => {}
@@ -405,12 +435,29 @@ fn run_parallel_steps(
         }
     }
 
-    if errors.is_empty() {
-        println!("  All parallel agents completed.");
-        Ok(())
-    } else {
-        Err(format!("Parallel execution failed:\n  {}", errors.join("\n  ")))
+    // Fire after hooks
+    for role in &hook_roles {
+        match role.as_str() {
+            "planner" => pm.fire(HookPoint::AfterPlan),
+            "builder" => pm.fire(HookPoint::AfterBuild),
+            "evaluator" => pm.fire(HookPoint::AfterEvaluate),
+            _ => {}
+        }
     }
+
+    if !errors.is_empty() {
+        return Err(format!("Parallel execution failed:\n  {}", errors.join("\n  ")));
+    }
+
+    // Merge isolated artifacts into shared location
+    let name_refs: Vec<&str> = completed_names.iter().map(|s| s.as_str()).collect();
+    // Merge status.md from all builders
+    let _ = artifacts::merge_agent_artifacts(&name_refs, "status.md");
+    // Merge any other common artifacts
+    let _ = artifacts::merge_agent_artifacts(&name_refs, "output.md");
+
+    println!("  All parallel agents completed (isolated artifacts in .harness/agents/).");
+    Ok(())
 }
 
 /// Run an iterative build-evaluate loop.
@@ -461,7 +508,7 @@ fn run_iterative_loop(
 }
 
 /// Build the prompt for an agent step.
-fn build_agent_prompt(agent: &AgentDef, config: &Config) -> Result<String, String> {
+pub fn build_agent_prompt(agent: &AgentDef, config: &Config) -> Result<String, String> {
     if let Some(template) = &agent.prompt_template {
         let path = std::path::Path::new(template);
         if path.exists() {
@@ -490,7 +537,7 @@ fn build_agent_prompt(agent: &AgentDef, config: &Config) -> Result<String, Strin
 }
 
 /// Resolve a comma-separated list of agent names into definitions.
-fn resolve_agent_names(names: &[&str]) -> Result<Vec<AgentDef>, String> {
+pub fn resolve_agent_names(names: &[&str]) -> Result<Vec<AgentDef>, String> {
     let mut defs = Vec::new();
     for name in names {
         let agent = agents::load(name)?;

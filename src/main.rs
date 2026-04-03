@@ -284,6 +284,7 @@ fn main() {
                     agents.as_deref(),
                     workflow.as_deref(),
                     parallel,
+                    no_tui,
                 )
             } else {
                 commands::run::run(backend.as_deref(), max_rounds, pause_after_plan, pause_after_eval, no_tui)
