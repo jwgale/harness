@@ -1,11 +1,20 @@
+use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 
 use crate::xdg;
+
+fn history_path() -> std::path::PathBuf {
+    xdg::data_dir().join("schedule-history.jsonl")
+}
+
+fn state_path() -> std::path::PathBuf {
+    xdg::data_dir().join("schedule-state.json")
+}
 
 pub fn add(name: &str, cron: &str, command: &str) -> Result<(), String> {
     xdg::ensure_dirs()?;
 
-    // Validate cron expression has 5 fields
     let fields: Vec<&str> = cron.split_whitespace().collect();
     if fields.len() != 5 {
         return Err(format!(
@@ -37,7 +46,7 @@ command = "{command}"
         .map_err(|e| format!("Failed to write schedule plugin: {e}"))?;
 
     println!("Scheduled task added: {name}");
-    println!("  Cron:    {cron}");
+    println!("  Cron:    {cron} (local time)");
     println!("  Command: {command}");
     println!("  Plugin:  {}", plugin_path.display());
     println!();
@@ -57,6 +66,7 @@ pub fn list() -> Result<(), String> {
         }
     };
 
+    let state = load_state();
     let mut found = false;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -85,11 +95,15 @@ pub fn list() -> Result<(), String> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("?");
 
+            let last_run = state.get(name)
+                .map(|ts| format!(" (last: {ts})"))
+                .unwrap_or_default();
+
             if !found {
                 println!("Scheduled tasks:");
                 found = true;
             }
-            println!("  {name}: [{cron}] `{cmd}`");
+            println!("  {name}: [{cron}] `{cmd}`{last_run}");
         }
     }
 
@@ -111,14 +125,56 @@ pub fn remove(name: &str) -> Result<(), String> {
     fs::remove_file(&plugin_path)
         .map_err(|e| format!("Failed to remove schedule: {e}"))?;
 
+    // Clean up state
+    let mut state = load_state();
+    state.remove(name);
+    save_state(&state);
+
     println!("Removed scheduled task: {name}");
     Ok(())
 }
 
-/// Parse a cron expression and check if it matches the given time.
-/// Supports: numbers, *, */N, comma-separated values.
-/// Fields: minute hour day-of-month month day-of-week
-pub fn cron_matches(cron: &str, now: &chrono::DateTime<chrono::Utc>) -> bool {
+pub fn history(limit: u32) -> Result<(), String> {
+    xdg::ensure_dirs()?;
+    let path = history_path();
+
+    if !path.exists() {
+        println!("No schedule execution history yet.");
+        println!("History is recorded when the daemon executes scheduled tasks.");
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read history: {e}"))?;
+
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(limit as usize);
+    let recent = &lines[start..];
+
+    if recent.is_empty() {
+        println!("No schedule execution history yet.");
+        return Ok(());
+    }
+
+    println!("Schedule execution history (last {}):", recent.len());
+    for line in recent {
+        if let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) {
+            let ts = entry["timestamp"].as_str().unwrap_or("?");
+            let name = entry["schedule"].as_str().unwrap_or("?");
+            let cmd = entry["command"].as_str().unwrap_or("?");
+            let exit = entry["exit_code"].as_i64().map(|c| c.to_string()).unwrap_or_else(|| "?".to_string());
+            let duration_ms = entry["duration_ms"].as_u64().unwrap_or(0);
+            let duration_s = duration_ms as f64 / 1000.0;
+
+            let status = if exit == "0" { "ok" } else { "FAIL" };
+            println!("  [{ts}] {name}: `{cmd}` -> {status} ({duration_s:.1}s)");
+        }
+    }
+    Ok(())
+}
+
+/// Parse a cron expression and check if it matches the given local time.
+pub fn cron_matches_local(cron: &str, now: &chrono::DateTime<chrono::Local>) -> bool {
     use chrono::Datelike;
     use chrono::Timelike;
 
@@ -143,17 +199,14 @@ fn field_matches(pattern: &str, value: u32) -> bool {
         return true;
     }
 
-    // Handle */N (step)
     if let Some(step) = pattern.strip_prefix("*/")
         && let Ok(n) = step.parse::<u32>()
     {
         return n > 0 && value.is_multiple_of(n);
     }
 
-    // Handle comma-separated values: "1,5,10"
     for part in pattern.split(',') {
         let part = part.trim();
-        // Handle range: "1-5"
         if let Some((start, end)) = part.split_once('-') {
             if let (Ok(s), Ok(e)) = (start.parse::<u32>(), end.parse::<u32>())
                 && value >= s && value <= e
@@ -215,4 +268,54 @@ pub fn load_schedules() -> Vec<(String, String, String)> {
         }
     }
     schedules
+}
+
+// --- State persistence for deduplication ---
+
+fn load_state() -> HashMap<String, String> {
+    let path = state_path();
+    if !path.exists() {
+        return HashMap::new();
+    }
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_default()
+}
+
+fn save_state(state: &HashMap<String, String>) {
+    if let Ok(json) = serde_json::to_string_pretty(state) {
+        let _ = fs::write(state_path(), json);
+    }
+}
+
+/// Check if a schedule was already run in the current minute. If not, mark it.
+pub fn should_run(name: &str, now_minute: i64) -> bool {
+    let mut state = load_state();
+    let key = format!("{name}:minute");
+    let last = state.get(&key).and_then(|v| v.parse::<i64>().ok()).unwrap_or(-1);
+    if last == now_minute {
+        return false;
+    }
+    state.insert(key, now_minute.to_string());
+    // Also update human-readable last_run for display
+    state.insert(name.to_string(), chrono::Local::now().format("%Y-%m-%d %H:%M").to_string());
+    save_state(&state);
+    true
+}
+
+/// Append an entry to schedule-history.jsonl
+pub fn record_history(name: &str, command: &str, exit_code: i32, duration_ms: u64) {
+    let entry = serde_json::json!({
+        "timestamp": chrono::Local::now().to_rfc3339(),
+        "schedule": name,
+        "command": command,
+        "exit_code": exit_code,
+        "duration_ms": duration_ms,
+    });
+
+    let path = history_path();
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "{}", entry);
+    }
 }

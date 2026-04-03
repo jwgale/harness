@@ -154,8 +154,8 @@ fn test_hook_execution() {
     // Init a project
     run_harness_in(&tmp, &["init", "Hook test"]);
 
-    // Run plan (will succeed or fail at claude invocation, but hook fires first)
-    let _ = run_harness_in(&tmp, &["plan", "--backend", "claude"]);
+    // Run plan with mock backend (fast, no real CLI needed)
+    let _ = run_harness_in(&tmp, &["plan", "--backend", "mock"]);
 
     // Check the marker file was created
     assert!(marker.exists(), "Hook did not fire — marker file not created at {}", marker.display());
@@ -179,6 +179,30 @@ fn test_feedback_no_harness() {
     let (_, stderr, ok) = run_harness_in(&tmp, &["feedback"]);
     assert!(!ok);
     assert!(stderr.contains("No .harness/"));
+    fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn test_schedule_history() {
+    let (stdout, _, ok) = run_harness(&["schedule", "history"]);
+    assert!(ok);
+    // Should say no history or show entries
+    assert!(stdout.contains("history") || stdout.contains("History"));
+}
+
+#[test]
+fn test_mock_backend_plan() {
+    let tmp = tempdir("mock");
+    run_harness_in(&tmp, &["init", "Mock test"]);
+
+    let (stdout, _, ok) = run_harness_in(&tmp, &["plan", "--backend", "mock"]);
+    assert!(ok, "mock plan failed: {stdout}");
+    assert!(stdout.contains("spec.md"));
+    assert!(tmp.join(".harness/spec.md").exists());
+
+    let spec = fs::read_to_string(tmp.join(".harness/spec.md")).unwrap();
+    assert!(spec.contains("Mock"));
+
     fs::remove_dir_all(&tmp).ok();
 }
 

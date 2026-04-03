@@ -6,6 +6,7 @@ use std::time::Duration;
 pub enum Backend {
     Claude,
     Codex,
+    Mock,
 }
 
 impl Backend {
@@ -13,7 +14,8 @@ impl Backend {
         match s {
             "claude" => Ok(Backend::Claude),
             "codex" => Ok(Backend::Codex),
-            _ => Err(format!("Unknown backend: {s}. Use 'claude' or 'codex'.")),
+            "mock" => Ok(Backend::Mock),
+            _ => Err(format!("Unknown backend: {s}. Use 'claude', 'codex', or 'mock'.")),
         }
     }
 }
@@ -24,6 +26,7 @@ pub fn run_oneshot(backend: &Backend, model: &str, prompt: &str, timeout_secs: u
     match backend {
         Backend::Claude => run_claude_oneshot(model, prompt, timeout_secs),
         Backend::Codex => run_codex_oneshot(prompt, timeout_secs),
+        Backend::Mock => Ok(mock_response("oneshot")),
     }
 }
 
@@ -33,7 +36,12 @@ pub fn run_builder(backend: &Backend, model: &str, prompt: &str, timeout_secs: u
     match backend {
         Backend::Claude => run_claude_builder(model, prompt, timeout_secs),
         Backend::Codex => run_codex_builder(prompt, timeout_secs),
+        Backend::Mock => Ok(mock_response("builder")),
     }
+}
+
+fn mock_response(phase: &str) -> String {
+    format!("# Mock {phase} response\n\nThis is a mock response for testing.\n\nVERDICT: PASS\n\nSCORES:\n  functionality: 8/10\n  completeness: 8/10\n  code_quality: 8/10\n  design_quality: 7/10\n  robustness: 7/10\n")
 }
 
 fn run_claude_oneshot(model: &str, prompt: &str, timeout_secs: u64) -> Result<String, String> {
@@ -266,6 +274,7 @@ pub fn run_oneshot_streaming(backend: &Backend, model: &str, prompt: &str, timeo
             cmd.args(["exec", "-q"]);
             spawn_streaming(cmd, prompt, timeout_secs)
         }
+        Backend::Mock => spawn_mock_streaming("oneshot"),
     }
 }
 
@@ -282,7 +291,14 @@ pub fn run_builder_streaming(backend: &Backend, model: &str, prompt: &str, timeo
             cmd.args(["exec", "-q", "--full-auto"]);
             spawn_streaming(cmd, prompt, timeout_secs)
         }
+        Backend::Mock => spawn_mock_streaming("builder"),
     }
+}
+
+fn spawn_mock_streaming(phase: &str) -> Result<StreamingProcess, String> {
+    let mut cmd = Command::new("echo");
+    cmd.arg(mock_response(phase));
+    spawn_streaming_no_stdin(cmd, 10)
 }
 
 fn wait_with_timeout(child: &mut std::process::Child, timeout_secs: u64) -> Result<std::process::Output, String> {

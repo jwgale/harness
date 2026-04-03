@@ -126,6 +126,12 @@ enum ScheduleAction {
         /// Name of the schedule to remove
         name: String,
     },
+    /// Show schedule execution history
+    History {
+        /// Number of entries to show
+        #[arg(long, default_value = "20")]
+        limit: u32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -181,6 +187,7 @@ fn main() {
             ScheduleAction::Add { name, cron, command } => commands::schedule::add(&name, &cron, &command),
             ScheduleAction::List => commands::schedule::list(),
             ScheduleAction::Remove { name } => commands::schedule::remove(&name),
+            ScheduleAction::History { limit } => commands::schedule::history(limit),
         },
     };
 

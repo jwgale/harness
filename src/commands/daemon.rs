@@ -264,12 +264,12 @@ pub fn run_daemon_loop() -> Result<(), String> {
             }
         }
 
-        // Check scheduled tasks once per minute
-        let now = chrono::Utc::now();
+        // Check scheduled tasks once per minute (local time)
+        let now = chrono::Local::now();
         let current_minute = now.timestamp() / 60;
         if current_minute != last_schedule_minute {
             last_schedule_minute = current_minute;
-            run_due_schedules(&now);
+            run_due_schedules(&now, current_minute);
         }
     }
 
@@ -373,32 +373,46 @@ fn refresh_watches(
     }
 }
 
-fn run_due_schedules(now: &chrono::DateTime<chrono::Utc>) {
+fn run_due_schedules(now: &chrono::DateTime<chrono::Local>, now_minute: i64) {
     let schedules = schedule::load_schedules();
     for (name, cron, cmd) in &schedules {
-        if schedule::cron_matches(cron, now) {
-            eprintln!("[daemon] Schedule '{name}' firing: `{cmd}`");
-            let result = Command::new("sh")
-                .args(["-c", cmd.as_str()])
-                .env("HARNESS_SCHEDULE", name)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .output();
+        if !schedule::cron_matches_local(cron, now) {
+            continue;
+        }
+        // Deduplication: skip if already run this minute
+        if !schedule::should_run(name, now_minute) {
+            continue;
+        }
 
-            match result {
-                Ok(output) => {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    for line in stdout.lines().chain(stderr.lines()) {
-                        if !line.trim().is_empty() {
-                            eprintln!("[schedule:{name}] {line}");
-                        }
-                    }
-                    if !output.status.success() {
-                        eprintln!("[schedule:{name}] exited with {}", output.status);
+        eprintln!("[daemon] Schedule '{name}' firing: `{cmd}`");
+        let start = std::time::Instant::now();
+        let result = Command::new("sh")
+            .args(["-c", cmd.as_str()])
+            .env("HARNESS_SCHEDULE", name.as_str())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output();
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        match result {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                for line in stdout.lines().chain(stderr.lines()) {
+                    if !line.trim().is_empty() {
+                        eprintln!("[schedule:{name}] {line}");
                     }
                 }
-                Err(e) => eprintln!("[schedule:{name}] failed to execute: {e}"),
+                let exit_code = output.status.code().unwrap_or(-1);
+                if !output.status.success() {
+                    eprintln!("[schedule:{name}] exited with {}", output.status);
+                }
+                schedule::record_history(name, cmd, exit_code, duration_ms);
+            }
+            Err(e) => {
+                eprintln!("[schedule:{name}] failed to execute: {e}");
+                schedule::record_history(name, cmd, -1, duration_ms);
             }
         }
     }

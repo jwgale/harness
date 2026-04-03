@@ -74,6 +74,7 @@ harness evaluate --backend claude
 | `harness schedule add <name> "<cron>" "<cmd>"` | Add a cron-style scheduled task |
 | `harness schedule list` | List scheduled tasks |
 | `harness schedule remove <name>` | Remove a scheduled task |
+| `harness schedule history [--limit N]` | Show schedule execution history |
 
 ### `harness run` options
 
@@ -256,7 +257,27 @@ harness schedule remove daily-build
 
 Schedules are stored as plugin TOML files and executed by the daemon. The daemon must be running for schedules to fire.
 
-Cron format: `minute hour day-of-month month day-of-week` with support for `*`, `*/N`, ranges (`1-5`), and lists (`1,5,10`).
+Cron format: `minute hour day-of-month month day-of-week` (local time) with support for `*`, `*/N`, ranges (`1-5`), and lists (`1,5,10`).
+
+### Reliability
+
+- **Deduplication** — each schedule tracks its last execution minute; daemon restarts won't fire the same schedule twice in the same minute
+- **Local timezone** — cron expressions match against your local time, not UTC
+- **Execution history** — every execution is logged to `~/.local/share/harness/schedule-history.jsonl`
+
+View recent executions:
+```bash
+harness schedule history           # last 20 entries
+harness schedule history --limit 5 # last 5 entries
+```
+
+### Mock Backend
+
+For testing, use `--backend mock` to skip real Claude/Codex invocations:
+```bash
+harness plan --backend mock    # instant mock response
+harness run --backend mock     # full loop with mock responses
+```
 
 ## Configuration
 
@@ -310,16 +331,21 @@ Harness is evolving from a thin orchestrator into a full local-first agent platf
 **Phase 6: Hot-Reload + Scheduled Tasks + Tests (done)**
 - Daemon hot-reloads plugins on TOML file changes
 - `harness workspace register` defaults to current dir
-- Watch cleanup on workspace removal
 - `harness schedule add/list/remove` with cron-style expressions
-- Integration test suite (8 tests covering workspace, schedule, hooks, init)
-- Daemon executes scheduled tasks at minute-level precision
+- Integration test suite
 
-**Phase 7: Custom Evaluators + External Integrations**
+**Phase 7: Schedule Reliability + Test Speed (done)**
+- Schedule deduplication (no double-fire on daemon restart)
+- Local timezone for cron evaluation
+- Execution history (`harness schedule history`)
+- Mock backend for instant testing (`--backend mock`)
+- 10 integration tests running in <1 second
+
+**Phase 8: Custom Evaluators + External Integrations**
 - Custom evaluator strategies (Playwright MCP, curl, etc.)
 - Notification hooks (Slack, email, webhooks)
 
-**Phase 8: Multi-Agent Orchestration**
+**Phase 9: Multi-Agent Orchestration**
 - Parallel builder sessions
 - Agent specialization (frontend, backend, testing)
 - Cross-project learning via Shared Context Layer
