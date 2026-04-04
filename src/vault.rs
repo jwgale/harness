@@ -156,7 +156,6 @@ pub fn get_credential_string(config: &VaultConfig, path: &str) -> Result<String,
 
 /// Use the "use, don't retrieve" pattern — vault executes the operation
 /// without exposing the raw credential.
-#[allow(dead_code)]
 pub fn use_credential(
     config: &VaultConfig,
     path: &str,

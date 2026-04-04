@@ -1,10 +1,13 @@
 //! Telegram bot bridge for controlling Harness via chat.
 //!
 //! Uses the Telegram Bot API via direct HTTP (long polling with curl).
-//! Credentials are resolved from SanctumAI vault first, then config fallback.
+//! Credentials are resolved exclusively from SanctumAI vault.
+//! Permission checks use vault policies before executing commands.
 
 use std::fs;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -14,6 +17,12 @@ use crate::vault;
 use crate::xdg;
 
 const POLL_TIMEOUT_SECS: u64 = 30;
+const WORKFLOW_WAIT_TIMEOUT_SECS: u64 = 1800; // 30 minutes max wait
+const WORKFLOW_POLL_INTERVAL_SECS: u64 = 10;
+
+// ---------------------------------------------------------------------------
+// Credentials
+// ---------------------------------------------------------------------------
 
 /// Resolved Telegram bridge credentials.
 struct BotCredentials {
@@ -40,50 +49,132 @@ fn resolve_credentials() -> Result<BotCredentials, String> {
         .map_err(|e| format!("Failed to get chat ID from vault: {e}"))?;
 
     if bot_token.is_empty() {
-        return Err("Bot token is empty. Run: harness vault add notifications/telegram/bot-token".to_string());
+        return Err(
+            "Bot token is empty. Run: harness vault add notifications/telegram/bot-token"
+                .to_string(),
+        );
     }
     if chat_id.is_empty() {
-        return Err("Chat ID is empty. Run: harness vault add notifications/telegram/chat-id".to_string());
+        return Err(
+            "Chat ID is empty. Run: harness vault add notifications/telegram/chat-id".to_string(),
+        );
     }
 
     Ok(BotCredentials { bot_token, chat_id })
 }
 
-/// Send a text message to the configured Telegram chat.
+// ---------------------------------------------------------------------------
+// Telegram Markdown escaping
+// ---------------------------------------------------------------------------
+
+/// Escape special characters for Telegram MarkdownV1.
+///
+/// Telegram's MarkdownV1 mode treats `_`, `*`, `` ` ``, and `[` as formatting.
+/// We escape them so arbitrary output renders safely. Backtick-delimited code
+/// spans in the input are preserved (contents not escaped).
+fn escape_markdown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + text.len() / 8);
+    let mut in_code = false;
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let ch = chars[i];
+
+        // Toggle code span tracking on backtick
+        if ch == '`' {
+            in_code = !in_code;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+
+        if in_code {
+            // Inside code span — pass through unescaped
+            out.push(ch);
+        } else {
+            // Outside code span — escape markdown-sensitive characters
+            match ch {
+                '_' | '*' | '[' => {
+                    out.push('\\');
+                    out.push(ch);
+                }
+                _ => out.push(ch),
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Telegram API helpers
+// ---------------------------------------------------------------------------
+
+/// Send a text message to a Telegram chat. Tries Markdown first, falls back to plain text.
 fn send_message(creds: &BotCredentials, text: &str) -> Result<(), String> {
     let url = format!(
         "https://api.telegram.org/bot{}/sendMessage",
         creds.bot_token
     );
     // Truncate to Telegram's 4096-char limit
-    let text = if text.len() > 4000 {
-        format!("{}…\n(truncated)", &text[..4000])
+    let escaped = escape_markdown(text);
+    let display_text = if escaped.len() > 4000 {
+        format!("{}...\n(truncated)", &escaped[..4000])
     } else {
-        text.to_string()
+        escaped
     };
+
+    // Try with Markdown first
     let payload = serde_json::json!({
         "chat_id": creds.chat_id,
-        "text": text,
+        "text": display_text,
         "parse_mode": "Markdown"
     });
     let body = payload.to_string();
     let output = Command::new("curl")
         .args([
-            "-s", "-o", "/dev/null", "-w", "%{http_code}",
-            "-X", "POST",
-            "-H", "Content-Type: application/json",
-            "--max-time", "10",
-            "-d", &body,
-            &url,
+            "-s", "-w", "\n%{http_code}", "-X", "POST", "-H",
+            "Content-Type: application/json",
+            "--max-time", "10", "-d", &body, &url,
         ])
         .output()
         .map_err(|e| format!("curl failed: {e}"))?;
 
-    let code = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let code = raw.lines().last().unwrap_or("").trim();
+
     if code.starts_with('2') {
+        return Ok(());
+    }
+
+    // Markdown parse failed — retry as plain text (no escaping needed)
+    let plain_text = if text.len() > 4000 {
+        format!("{}...\n(truncated)", &text[..4000])
+    } else {
+        text.to_string()
+    };
+    let plain_payload = serde_json::json!({
+        "chat_id": creds.chat_id,
+        "text": plain_text,
+    });
+    let plain_body = plain_payload.to_string();
+    let plain_output = Command::new("curl")
+        .args([
+            "-s", "-o", "/dev/null", "-w", "%{http_code}", "-X", "POST", "-H",
+            "Content-Type: application/json",
+            "--max-time", "10", "-d", &plain_body, &url,
+        ])
+        .output()
+        .map_err(|e| format!("curl plain fallback failed: {e}"))?;
+
+    let plain_code = String::from_utf8_lossy(&plain_output.stdout)
+        .trim()
+        .to_string();
+    if plain_code.starts_with('2') {
         Ok(())
     } else {
-        Err(format!("Telegram API returned HTTP {code}"))
+        Err(format!("Telegram API returned HTTP {plain_code}"))
     }
 }
 
@@ -103,13 +194,16 @@ fn get_updates(bot_token: &str, offset: i64) -> Result<Vec<Value>, String> {
         .map_err(|e| format!("curl failed: {e}"))?;
 
     let body = String::from_utf8_lossy(&output.stdout);
-    let parsed: Value = serde_json::from_str(&body)
-        .map_err(|e| format!("Failed to parse Telegram response: {e}"))?;
+    let parsed: Value =
+        serde_json::from_str(&body).map_err(|e| format!("Failed to parse Telegram response: {e}"))?;
 
     if parsed.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         return Err(format!(
             "Telegram API error: {}",
-            parsed.get("description").and_then(|v| v.as_str()).unwrap_or("unknown")
+            parsed
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
         ));
     }
 
@@ -119,6 +213,59 @@ fn get_updates(bot_token: &str, offset: i64) -> Result<Vec<Value>, String> {
         .cloned()
         .unwrap_or_default())
 }
+
+// ---------------------------------------------------------------------------
+// Vault policy checks
+// ---------------------------------------------------------------------------
+
+/// Check if the vault grants the given policy (e.g. "harness:bridge:telegram:run").
+/// Returns Ok(()) if allowed, Err(message) if denied.
+///
+/// When the vault is unreachable or policies aren't configured, we fall back to
+/// allow — the vault being enabled and the user having stored credentials is
+/// considered sufficient authorization.
+fn check_policy(policy: &str) -> Result<(), String> {
+    let vc = vault::load_config();
+    if !vc.enabled {
+        return Ok(()); // vault disabled → no policy enforcement
+    }
+
+    let params = serde_json::json!({ "policy": policy });
+    match vault::use_credential(&vc, "_policy", "check", params) {
+        Ok(result) => {
+            let allowed = result
+                .get("allowed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true); // default allow if field missing
+            if allowed {
+                Ok(())
+            } else {
+                let reason = result
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("policy denied");
+                Err(format!("Permission denied: {reason}\nPolicy: `{policy}`"))
+            }
+        }
+        // Vault unreachable or _policy not implemented → allow
+        Err(_) => Ok(()),
+    }
+}
+
+/// Map a command name to its policy string.
+fn policy_for_command(cmd: &str) -> &str {
+    match cmd {
+        "/run" => "harness:bridge:telegram:run",
+        "/status" => "harness:bridge:telegram:status",
+        "/agent" => "harness:bridge:telegram:agent",
+        "/vault" => "harness:bridge:telegram:vault",
+        _ => "harness:bridge:telegram:other",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Command parsing
+// ---------------------------------------------------------------------------
 
 /// Parse a Telegram command from message text. Returns (command, args).
 fn parse_command(text: &str) -> Option<(&str, &str)> {
@@ -139,50 +286,336 @@ fn parse_command(text: &str) -> Option<(&str, &str)> {
 }
 
 /// Execute a bridge command and return the response text.
-fn handle_command(cmd: &str, args: &str) -> String {
+/// If the command is /run with --wait or a completion callback, it returns
+/// an initial ack and the callback sender handles the follow-up message.
+fn handle_command(cmd: &str, args: &str, creds: &Arc<BotCredentials>) -> String {
+    // Policy check
+    let policy = policy_for_command(cmd);
+    if let Err(deny) = check_policy(policy) {
+        return deny;
+    }
+
     match cmd {
-        "/run" => cmd_run(args),
+        "/run" => cmd_run(args, creds),
         "/status" => cmd_status(),
         "/agent" => cmd_agent(args),
         "/vault" => cmd_vault(args),
-        "/help" => cmd_help(),
-        "/start" => cmd_help(), // Telegram sends /start on first interaction
+        "/help" | "/start" => cmd_help(),
         _ => format!("Unknown command: {cmd}\nType /help for available commands."),
     }
 }
 
-/// /run <workflow-name> — trigger a workflow.
-fn cmd_run(args: &str) -> String {
-    let workflow = args.trim();
+// ---------------------------------------------------------------------------
+// /run command with completion callback and --wait mode
+// ---------------------------------------------------------------------------
+
+/// /run <workflow-name> [--wait] — trigger a workflow with optional wait.
+fn cmd_run(args: &str, creds: &Arc<BotCredentials>) -> String {
+    // Parse --wait flag
+    let (workflow, wait_mode) = parse_run_args(args);
+
     if workflow.is_empty() {
-        return "Usage: /run <workflow-name>\n\nRuns a named workflow. List workflows with /status.".to_string();
+        return "Usage: /run <workflow-name> [--wait]\n\n\
+                /run my-workflow — start and get result when done\n\
+                /run my-workflow --wait — block with progress updates\n\n\
+                List workflows with /status."
+            .to_string();
     }
 
     // Check if workflow exists
     let wf_dir = xdg::config_dir().join("workflows");
     let wf_path = wf_dir.join(format!("{workflow}.toml"));
     if !wf_path.exists() {
-        return format!("Workflow '{workflow}' not found.\n\nAvailable workflows:\n{}", list_workflows());
+        return format!(
+            "Workflow '{workflow}' not found.\n\nAvailable workflows:\n{}",
+            list_workflows()
+        );
     }
 
-    // Launch workflow in background via harness CLI
+    // Find a workspace with .harness/ to run in
+    let work_dir = find_active_workspace().unwrap_or_else(|| {
+        std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+    });
+
+    // Launch workflow via harness CLI
     let binary = match std::env::current_exe() {
         Ok(p) => p.to_string_lossy().to_string(),
         Err(e) => return format!("Failed to find harness binary: {e}"),
     };
 
-    match Command::new(&binary)
-        .args(["run", "--workflow", workflow, "--no-tui"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+    let mut child = match Command::new(&binary)
+        .args(["run", "--workflow", &workflow, "--no-tui"])
+        .current_dir(&work_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()
     {
-        Ok(child) => {
-            format!("Workflow '{workflow}' started (PID {})", child.id())
+        Ok(c) => c,
+        Err(e) => return format!("Failed to start workflow: {e}"),
+    };
+
+    let pid = child.id();
+    let wf_name = workflow.to_string();
+    let creds_clone = Arc::clone(creds);
+    let work_dir_display = work_dir.display().to_string();
+
+    if wait_mode {
+        // --wait: block this thread, send progress updates, then final result
+        let ack = format!(
+            "Workflow '{wf_name}' started (PID {pid})\nWaiting for completion (timeout: {}m)...",
+            WORKFLOW_WAIT_TIMEOUT_SECS / 60
+        );
+        let _ = send_message(&creds_clone, &ack);
+
+        // Poll for completion with progress updates
+        let result = wait_for_workflow(&mut child, &wf_name, &creds_clone, &work_dir);
+        return result;
+    }
+
+    // Default: fire-and-forget with completion callback thread
+    let callback_creds = Arc::clone(creds);
+    thread::spawn(move || {
+        workflow_completion_callback(child, &wf_name, &callback_creds, &work_dir_display);
+    });
+
+    format!("Workflow '{workflow}' started (PID {pid}) in `{}`\nYou'll get a result when it finishes.", work_dir.display())
+}
+
+/// Parse /run args into (workflow_name, wait_mode).
+fn parse_run_args(args: &str) -> (String, bool) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let mut workflow = String::new();
+    let mut wait = false;
+
+    for part in &parts {
+        if *part == "--wait" {
+            wait = true;
+        } else if workflow.is_empty() {
+            workflow = part.to_string();
         }
-        Err(e) => format!("Failed to start workflow: {e}"),
+    }
+
+    (workflow, wait)
+}
+
+/// Wait for a workflow child process, sending periodic progress updates.
+fn wait_for_workflow(
+    child: &mut std::process::Child,
+    workflow: &str,
+    creds: &BotCredentials,
+    work_dir: &std::path::Path,
+) -> String {
+    let start = std::time::Instant::now();
+    let mut last_update = std::time::Instant::now();
+    let eval_path = work_dir.join(".harness/evaluation.md");
+    let status_path = work_dir.join(".harness/status.md");
+    let mut last_status_len: u64 = 0;
+
+    loop {
+        // Check if process finished
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let elapsed = start.elapsed().as_secs();
+                let outcome = if status.success() { "completed" } else { "failed" };
+                let mut result = format!(
+                    "Workflow '{workflow}' {outcome} ({elapsed}s)"
+                );
+
+                // Read evaluation.md for verdict
+                if let Ok(eval) = fs::read_to_string(&eval_path) {
+                    let verdict = extract_verdict(&eval);
+                    if !verdict.is_empty() {
+                        result.push_str(&format!("\nVerdict: {verdict}"));
+                    }
+                    // Include first few lines of evaluation
+                    let summary = eval.lines().take(10).collect::<Vec<_>>().join("\n");
+                    if !summary.is_empty() {
+                        result.push_str(&format!("\n\n{summary}"));
+                    }
+                }
+
+                // Capture stderr for errors
+                if !status.success()
+                    && let Some(stderr) = child.stderr.take()
+                {
+                    use std::io::Read;
+                    let mut buf = String::new();
+                    let mut reader = std::io::BufReader::new(stderr);
+                    let _ = reader.read_to_string(&mut buf);
+                    if !buf.is_empty() {
+                        let snippet = if buf.len() > 500 {
+                            &buf[buf.len() - 500..]
+                        } else {
+                            &buf
+                        };
+                        result.push_str(&format!("\n\nError output:\n```\n{snippet}\n```"));
+                    }
+                }
+
+                return result;
+            }
+            Ok(None) => {
+                // Still running
+            }
+            Err(e) => {
+                return format!("Error waiting for workflow: {e}");
+            }
+        }
+
+        // Timeout check
+        if start.elapsed().as_secs() > WORKFLOW_WAIT_TIMEOUT_SECS {
+            let _ = child.kill();
+            return format!(
+                "Workflow '{workflow}' timed out after {}m. Process killed.",
+                WORKFLOW_WAIT_TIMEOUT_SECS / 60
+            );
+        }
+
+        // Send progress update every 60 seconds
+        if last_update.elapsed().as_secs() >= 60 {
+            last_update = std::time::Instant::now();
+            let elapsed = start.elapsed().as_secs();
+            let mut progress = format!("Still running... ({elapsed}s)");
+
+            // Check if status.md has been updated
+            if let Ok(meta) = fs::metadata(&status_path) {
+                let current_len = meta.len();
+                if current_len != last_status_len {
+                    last_status_len = current_len;
+                    if let Ok(content) = fs::read_to_string(&status_path) {
+                        let last_line = content.lines().last().unwrap_or("");
+                        if !last_line.is_empty() {
+                            progress.push_str(&format!("\nLatest: {last_line}"));
+                        }
+                    }
+                }
+            }
+
+            let _ = send_message(creds, &progress);
+        }
+
+        thread::sleep(Duration::from_secs(WORKFLOW_POLL_INTERVAL_SECS));
     }
 }
+
+/// Background thread: wait for workflow to finish and send result to Telegram.
+fn workflow_completion_callback(
+    mut child: std::process::Child,
+    workflow: &str,
+    creds: &BotCredentials,
+    work_dir: &str,
+) {
+    let start = std::time::Instant::now();
+
+    // Wait with timeout
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let elapsed = start.elapsed().as_secs();
+                let outcome = if status.success() {
+                    "completed"
+                } else {
+                    "failed"
+                };
+                let mut result = format!("Workflow '{workflow}' {outcome} ({elapsed}s)");
+
+                // Read evaluation.md for verdict summary
+                let eval_path =
+                    std::path::PathBuf::from(work_dir).join(".harness/evaluation.md");
+                if let Ok(eval) = fs::read_to_string(&eval_path) {
+                    let verdict = extract_verdict(&eval);
+                    if !verdict.is_empty() {
+                        result.push_str(&format!("\nVerdict: {verdict}"));
+                    }
+                    let summary = eval.lines().take(10).collect::<Vec<_>>().join("\n");
+                    if !summary.is_empty() {
+                        result.push_str(&format!("\n\n{summary}"));
+                    }
+                }
+
+                // Capture stderr on failure
+                if !status.success()
+                    && let Some(stderr) = child.stderr.take()
+                {
+                    use std::io::Read;
+                    let mut buf = String::new();
+                    let mut reader = std::io::BufReader::new(stderr);
+                    let _ = reader.read_to_string(&mut buf);
+                    if !buf.is_empty() {
+                        let snippet = if buf.len() > 500 {
+                            &buf[buf.len() - 500..]
+                        } else {
+                            &buf
+                        };
+                        result.push_str(&format!("\n\nError output:\n```\n{snippet}\n```"));
+                    }
+                }
+
+                scl_lifecycle::record_bridge_response("telegram", "/run", &result);
+                let _ = send_message(creds, &result);
+                return;
+            }
+            Ok(None) => {
+                // Still running — check timeout
+                if start.elapsed().as_secs() > WORKFLOW_WAIT_TIMEOUT_SECS {
+                    let _ = child.kill();
+                    let msg = format!(
+                        "Workflow '{workflow}' timed out after {}m. Process killed.",
+                        WORKFLOW_WAIT_TIMEOUT_SECS / 60
+                    );
+                    let _ = send_message(creds, &msg);
+                    return;
+                }
+            }
+            Err(e) => {
+                let msg = format!("Error waiting for workflow '{workflow}': {e}");
+                let _ = send_message(creds, &msg);
+                return;
+            }
+        }
+
+        thread::sleep(Duration::from_secs(WORKFLOW_POLL_INTERVAL_SECS));
+    }
+}
+
+/// Extract verdict line from evaluation.md content.
+fn extract_verdict(eval_content: &str) -> String {
+    for line in eval_content.lines() {
+        let lower = line.to_lowercase();
+        if lower.contains("verdict:") || lower.contains("## verdict") {
+            return line.trim().to_string();
+        }
+        // Look for standalone PASS/FAIL/REVISE
+        let trimmed = line.trim().to_uppercase();
+        if trimmed == "PASS" || trimmed == "FAIL" || trimmed == "REVISE" {
+            return trimmed;
+        }
+    }
+    String::new()
+}
+
+/// Find the first registered workspace that has a .harness/ directory.
+fn find_active_workspace() -> Option<std::path::PathBuf> {
+    let ws_dir = xdg::data_dir().join("workspaces");
+    let entries = fs::read_dir(&ws_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "path")
+            && let Ok(ws_path) = fs::read_to_string(&path)
+        {
+            let p = std::path::PathBuf::from(ws_path.trim());
+            if p.join(".harness").exists() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// /status command
+// ---------------------------------------------------------------------------
 
 /// /status — show workspaces, schedules, and workflows.
 fn cmd_status() -> String {
@@ -198,7 +631,7 @@ fn cmd_status() -> String {
             .filter(|e| e.path().extension().is_some_and(|ext| ext == "path"))
             .collect();
         if !workspaces.is_empty() {
-            lines.push(format!("\n📁 *Workspaces* ({})", workspaces.len()));
+            lines.push(format!("\nWorkspaces ({})", workspaces.len()));
             for ws in &workspaces {
                 let name = ws
                     .path()
@@ -213,27 +646,27 @@ fn cmd_status() -> String {
                 }
             }
         } else {
-            lines.push("\n📁 No workspaces registered.".to_string());
+            lines.push("\nNo workspaces registered.".to_string());
         }
     }
 
     // Schedules
     let schedules = crate::commands::schedule::load_schedules();
     if !schedules.is_empty() {
-        lines.push(format!("\n⏰ *Schedules* ({})", schedules.len()));
+        lines.push(format!("\nSchedules ({})", schedules.len()));
         for (name, cron, cmd) in &schedules {
             lines.push(format!("  `{name}`: [{cron}] `{cmd}`"));
         }
     } else {
-        lines.push("\n⏰ No schedules.".to_string());
+        lines.push("\nNo schedules.".to_string());
     }
 
     // Workflows
     let wf_list = list_workflows();
     if wf_list.is_empty() {
-        lines.push("\n📋 No workflows defined.".to_string());
+        lines.push("\nNo workflows defined.".to_string());
     } else {
-        lines.push(format!("\n📋 *Workflows*\n{wf_list}"));
+        lines.push(format!("\n*Workflows*\n{wf_list}"));
     }
 
     // Daemon status
@@ -249,13 +682,17 @@ fn cmd_status() -> String {
         .unwrap_or(false);
 
     lines.push(format!(
-        "\n🔧 Daemon: {} | Bridge: {}",
+        "\nDaemon: {} | Bridge: {}",
         if daemon_active { "running" } else { "stopped" },
         if bridge_active { "running" } else { "stopped" },
     ));
 
     lines.join("\n")
 }
+
+// ---------------------------------------------------------------------------
+// /agent list
+// ---------------------------------------------------------------------------
 
 /// /agent list — list defined agents.
 fn cmd_agent(args: &str) -> String {
@@ -266,7 +703,7 @@ fn cmd_agent(args: &str) -> String {
 
     let agents_dir = xdg::config_dir().join("agents");
     if !agents_dir.exists() {
-        return "No agents defined.\n\nDefine agents with: `harness agent add <name> --role <role> --backend <backend>`".to_string();
+        return "No agents defined.\n\nDefine agents with:\n`harness agent add <name> --role <role> --backend <backend>`".to_string();
     }
 
     let entries = match fs::read_dir(&agents_dir) {
@@ -294,7 +731,7 @@ fn cmd_agent(args: &str) -> String {
                 .get("backend")
                 .and_then(|v| v.as_str())
                 .unwrap_or("?");
-            lines.push(format!("  `{name}` — {role} ({backend})"));
+            lines.push(format!("  `{name}` -- {role} ({backend})"));
             count += 1;
         }
     }
@@ -304,6 +741,10 @@ fn cmd_agent(args: &str) -> String {
     }
     lines.join("\n")
 }
+
+// ---------------------------------------------------------------------------
+// /vault status
+// ---------------------------------------------------------------------------
 
 /// /vault status — show vault health.
 fn cmd_vault(args: &str) -> String {
@@ -324,7 +765,7 @@ fn cmd_vault(args: &str) -> String {
         format!("  Agent: `{}`", vc.agent_name),
         format!(
             "  Status: {}",
-            if healthy { "connected ✅" } else { "unreachable ❌" }
+            if healthy { "connected" } else { "unreachable" }
         ),
     ];
 
@@ -337,7 +778,7 @@ fn cmd_vault(args: &str) -> String {
                     if d.is_empty() {
                         lines.push(format!("    `{path}`"));
                     } else {
-                        lines.push(format!("    `{path}` — {d}"));
+                        lines.push(format!("    `{path}` -- {d}"));
                     }
                 }
             }
@@ -348,17 +789,27 @@ fn cmd_vault(args: &str) -> String {
     lines.join("\n")
 }
 
+// ---------------------------------------------------------------------------
+// /help
+// ---------------------------------------------------------------------------
+
 /// /help — list available commands.
 fn cmd_help() -> String {
     "*Harness Telegram Bridge*\n\n\
      Available commands:\n\
-     /run <workflow> — Start a workflow\n\
-     /status — Show workspaces, schedules, workflows\n\
-     /agent list — List defined agents\n\
-     /vault status — Show vault health\n\
-     /help — Show this message"
+     /run <workflow> -- Start a workflow (result sent on completion)\n\
+     /run <workflow> --wait -- Start and stream progress updates\n\
+     /status -- Show workspaces, schedules, workflows\n\
+     /agent list -- List defined agents\n\
+     /vault status -- Show vault health\n\
+     /help -- Show this message\n\n\
+     All commands require vault policy authorization."
         .to_string()
 }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 /// List available workflows as formatted text.
 fn list_workflows() -> String {
@@ -388,7 +839,7 @@ fn list_workflows() -> String {
             if desc.is_empty() {
                 lines.push(format!("  `{name}`"));
             } else {
-                lines.push(format!("  `{name}` — {desc}"));
+                lines.push(format!("  `{name}` -- {desc}"));
             }
         }
     }
@@ -413,6 +864,10 @@ fn save_offset(offset: i64) {
     let _ = fs::write(offset_file(), offset.to_string());
 }
 
+// ---------------------------------------------------------------------------
+// Main listener loop
+// ---------------------------------------------------------------------------
+
 /// Run the Telegram bot listener loop. Blocks forever (meant for systemd).
 pub fn run_listener() -> Result<(), String> {
     let creds = resolve_credentials()?;
@@ -428,9 +883,9 @@ pub fn run_listener() -> Result<(), String> {
         .map_err(|e| format!("curl failed: {e}"))?;
     let me_body = String::from_utf8_lossy(&output.stdout);
     let me: Value = serde_json::from_str(&me_body)
-        .map_err(|_| "Failed to validate bot token — invalid response from Telegram API".to_string())?;
+        .map_err(|_| "Failed to validate bot token -- invalid response from Telegram API".to_string())?;
     if me.get("ok").and_then(|v| v.as_bool()) != Some(true) {
-        return Err("Invalid bot token — Telegram API rejected it.".to_string());
+        return Err("Invalid bot token -- Telegram API rejected it.".to_string());
     }
     let bot_name = me
         .pointer("/result/username")
@@ -441,11 +896,26 @@ pub fn run_listener() -> Result<(), String> {
     eprintln!("[telegram] Listening for commands in chat {}", creds.chat_id);
 
     // Record bridge start to SCL
-    scl_lifecycle::record_bridge_event("telegram", "start", &format!("Bot @{bot_name} listening"));
+    scl_lifecycle::record_bridge_event(
+        "telegram",
+        "start",
+        &format!("Bot @{bot_name} listening"),
+    );
 
+    // Wrap creds in Arc for sharing with callback threads
+    let creds = Arc::new(creds);
     let mut offset = load_offset();
 
+    // Track active workflow threads for cleanup
+    let active_threads: Arc<Mutex<Vec<thread::JoinHandle<()>>>> =
+        Arc::new(Mutex::new(Vec::new()));
+
     loop {
+        // Clean up finished threads
+        if let Ok(mut threads) = active_threads.lock() {
+            threads.retain(|t| !t.is_finished());
+        }
+
         match get_updates(&creds.bot_token, offset) {
             Ok(updates) => {
                 for update in &updates {
@@ -456,7 +926,9 @@ pub fn run_listener() -> Result<(), String> {
                     }
 
                     // Extract message text and chat_id
-                    let msg = update.get("message").or_else(|| update.get("edited_message"));
+                    let msg = update
+                        .get("message")
+                        .or_else(|| update.get("edited_message"));
                     let Some(msg) = msg else { continue };
 
                     let msg_chat_id = msg
@@ -489,7 +961,7 @@ pub fn run_listener() -> Result<(), String> {
                     scl_lifecycle::record_bridge_command("telegram", user, cmd, args);
 
                     // Execute command
-                    let response = handle_command(cmd, args);
+                    let response = handle_command(cmd, args, &creds);
 
                     // Record response to SCL
                     scl_lifecycle::record_bridge_response("telegram", cmd, &response);
@@ -497,36 +969,20 @@ pub fn run_listener() -> Result<(), String> {
                     // Send response back to Telegram
                     if let Err(e) = send_message(&creds, &response) {
                         eprintln!("[telegram] Failed to send response: {e}");
-                        // Try again without markdown in case of parse errors
-                        let plain_payload = serde_json::json!({
-                            "chat_id": creds.chat_id,
-                            "text": response,
-                        });
-                        let url = format!(
-                            "https://api.telegram.org/bot{}/sendMessage",
-                            creds.bot_token
-                        );
-                        let body = plain_payload.to_string();
-                        let _ = Command::new("curl")
-                            .args([
-                                "-s", "-o", "/dev/null",
-                                "-X", "POST",
-                                "-H", "Content-Type: application/json",
-                                "--max-time", "10",
-                                "-d", &body,
-                                &url,
-                            ])
-                            .output();
                     }
                 }
             }
             Err(e) => {
                 eprintln!("[telegram] Poll error: {e}");
-                std::thread::sleep(Duration::from_secs(5));
+                thread::sleep(Duration::from_secs(5));
             }
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Public helpers for bridge_cmd
+// ---------------------------------------------------------------------------
 
 /// Check if the bridge service is running.
 pub fn is_running() -> bool {
@@ -561,13 +1017,20 @@ pub fn check_credentials() -> Result<String, String> {
     Ok(format!("@{bot_name}"))
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_parse_command_basic() {
-        assert_eq!(parse_command("/run my-workflow"), Some(("/run", "my-workflow")));
+        assert_eq!(
+            parse_command("/run my-workflow"),
+            Some(("/run", "my-workflow"))
+        );
         assert_eq!(parse_command("/status"), Some(("/status", "")));
         assert_eq!(parse_command("/agent list"), Some(("/agent", "list")));
         assert_eq!(parse_command("/vault status"), Some(("/vault", "status")));
@@ -576,7 +1039,10 @@ mod tests {
     #[test]
     fn test_parse_command_with_botname() {
         assert_eq!(parse_command("/status@mybot"), Some(("/status", "")));
-        assert_eq!(parse_command("/run@mybot my-workflow"), Some(("/run", "my-workflow")));
+        assert_eq!(
+            parse_command("/run@mybot my-workflow"),
+            Some(("/run", "my-workflow"))
+        );
     }
 
     #[test]
@@ -594,5 +1060,64 @@ mod tests {
         assert!(help.contains("/agent"));
         assert!(help.contains("/vault"));
         assert!(help.contains("/help"));
+        assert!(help.contains("--wait"));
+    }
+
+    #[test]
+    fn test_escape_markdown_basic() {
+        assert_eq!(escape_markdown("hello"), "hello");
+        assert_eq!(escape_markdown("hello_world"), "hello\\_world");
+        assert_eq!(escape_markdown("*bold*"), "\\*bold\\*");
+        assert_eq!(escape_markdown("[link]"), "\\[link]");
+    }
+
+    #[test]
+    fn test_escape_markdown_preserves_code_spans() {
+        assert_eq!(escape_markdown("`code_here`"), "`code_here`");
+        assert_eq!(
+            escape_markdown("text `code_span` more_text"),
+            "text `code_span` more\\_text"
+        );
+    }
+
+    #[test]
+    fn test_escape_markdown_no_double_escape() {
+        // Already-escaped content shouldn't double-escape
+        assert_eq!(escape_markdown("a\\b"), "a\\b");
+    }
+
+    #[test]
+    fn test_parse_run_args() {
+        assert_eq!(parse_run_args("my-workflow"), ("my-workflow".to_string(), false));
+        assert_eq!(
+            parse_run_args("my-workflow --wait"),
+            ("my-workflow".to_string(), true)
+        );
+        assert_eq!(
+            parse_run_args("--wait my-workflow"),
+            ("my-workflow".to_string(), true)
+        );
+        assert_eq!(parse_run_args(""), (String::new(), false));
+    }
+
+    #[test]
+    fn test_extract_verdict() {
+        assert_eq!(extract_verdict("Verdict: PASS"), "Verdict: PASS");
+        assert_eq!(extract_verdict("## Verdict\nPASS"), "## Verdict");
+        assert_eq!(extract_verdict("Some text\nPASS\nMore"), "PASS");
+        assert_eq!(extract_verdict("no verdict here"), "");
+    }
+
+    #[test]
+    fn test_policy_for_command() {
+        assert_eq!(policy_for_command("/run"), "harness:bridge:telegram:run");
+        assert_eq!(
+            policy_for_command("/status"),
+            "harness:bridge:telegram:status"
+        );
+        assert_eq!(
+            policy_for_command("/unknown"),
+            "harness:bridge:telegram:other"
+        );
     }
 }

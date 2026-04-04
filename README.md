@@ -4,17 +4,24 @@ A CLI tool that orchestrates **planner -> builder -> evaluator** loops using sub
 
 Inspired by [Anthropic's harness architecture](https://www.anthropic.com/engineering/harness-design-long-running-apps) for long-running application development with Opus 4.6.
 
-## v0.10.0 Release Notes
+## v0.10.1 Release Notes
 
-Harness v0.10.0 adds the Telegram Command Bridge — control Harness from your phone.
+Harness v0.10.1 closes the feedback loop on the Telegram bridge.
 
-**New in v0.10.0:**
+**New in v0.10.1:**
+- **Workflow Completion Callback** — `/run <workflow>` sends results back to Telegram when the workflow finishes (verdict, timing, evaluation summary)
+- **`/run --wait` Mode** — blocks with periodic progress updates until the workflow completes
+- **Vault Policy Authorization** — each bridge command checks `harness:bridge:telegram:<cmd>` policy before executing; graceful denial on failure
+- **Robust Markdown Escaping** — `escape_markdown()` helper for safe Telegram MarkdownV1 output with automatic plain-text fallback
+- **Active Workspace Discovery** — `/run` auto-finds a registered workspace with `.harness/` to run workflows in
+- **10 Unit Tests + 30 Integration Tests** — including markdown escaping, parse\_run\_args, verdict extraction, policy mapping
+
+**v0.10.0:**
 - **Telegram Command Bridge** — `harness bridge telegram start/status/stop` for chat-based control
 - **Bot Commands** — `/run`, `/status`, `/agent list`, `/vault status` via Telegram
 - **Systemd-Managed** — bridge runs as a background service with auto-restart
 - **Vault-Only Credentials** — bot token and chat ID pulled exclusively from SanctumAI vault
 - **SCL Recording** — every bridge command and response logged to Shared Context Layer
-- **30 Integration Tests** — including bridge status and help tests
 
 **v0.9.0:**
 - **SanctumAI Vault** — `harness vault init/status/add/list` for Ed25519-authenticated credential management
@@ -578,11 +585,48 @@ harness bridge telegram start
 
 | Command | Description |
 |---------|-------------|
-| `/run <workflow>` | Start a named workflow |
+| `/run <workflow>` | Start a workflow; sends result on completion |
+| `/run <workflow> --wait` | Start a workflow with periodic progress updates |
 | `/status` | Show workspaces, schedules, workflows, daemon/bridge state |
 | `/agent list` | List defined agents |
 | `/vault status` | Show vault connection health |
 | `/help` | List available commands |
+
+### `/run` Examples
+
+```
+/run standard
+  → "Workflow 'standard' started (PID 12345) in /home/user/projects/myapp
+     You'll get a result when it finishes."
+  ... (workflow runs) ...
+  → "Workflow 'standard' completed (142s)
+     Verdict: PASS"
+
+/run standard --wait
+  → "Workflow 'standard' started (PID 12345)
+     Waiting for completion (timeout: 30m)..."
+  → "Still running... (60s)
+     Latest: Build phase complete"
+  → "Workflow 'standard' completed (142s)
+     Verdict: PASS
+     ## Evaluation Summary
+     All acceptance criteria met."
+```
+
+The default mode (no `--wait`) returns immediately and sends results asynchronously when the workflow finishes. The `--wait` mode sends progress updates every 60 seconds and blocks until completion (30-minute timeout).
+
+### Permission System
+
+All bridge commands check SanctumAI vault policies before executing:
+
+| Policy | Governs |
+|--------|---------|
+| `harness:bridge:telegram:run` | `/run` command |
+| `harness:bridge:telegram:status` | `/status` command |
+| `harness:bridge:telegram:agent` | `/agent` commands |
+| `harness:bridge:telegram:vault` | `/vault` commands |
+
+If the vault is unreachable or policies aren't configured, commands are allowed by default (having stored credentials is considered sufficient authorization). When a policy denies a command, the bot replies with a clear denial message.
 
 ### Management
 
@@ -594,7 +638,7 @@ harness bridge telegram stop     # Stop and disable the bridge
 
 The bridge runs as a systemd user service (`harness-telegram`) with automatic restart on failure. It uses long-polling (no webhooks/ports needed).
 
-All commands and responses are recorded to the Shared Context Layer for audit and cross-session visibility.
+All commands and responses are recorded to the Shared Context Layer for audit and cross-session visibility. Markdown output is escaped for safe rendering, with automatic plain-text fallback on parse errors.
 
 ### Notifications
 
@@ -924,7 +968,15 @@ Harness is evolving from a thin orchestrator into a full local-first agent platf
 - Long-polling (no webhooks/open ports needed)
 - 30 integration tests
 
-**Phase 19: Agent Specialization + Cross-Project Learning**
+**Phase 19: Telegram Bridge Feedback Loop + Polish (done)**
+- Workflow completion callback — `/run` sends results back on finish
+- `/run --wait` mode with periodic progress updates (60s interval, 30m timeout)
+- Vault policy authorization (`harness:bridge:telegram:<cmd>`) before all commands
+- Robust Markdown escaping with automatic plain-text fallback
+- Active workspace discovery for workflow execution
+- 10 unit tests + 30 integration tests
+
+**Phase 20: Agent Specialization + Cross-Project Learning**
 - Agent specialization (frontend, backend, testing)
 - Cross-project learning via Shared Context Layer
 
