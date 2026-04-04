@@ -82,6 +82,33 @@ pub fn record_loop_iteration(project: &str, round: u32, max: u32) {
     ));
 }
 
+/// Record a bridge lifecycle event (start/stop).
+pub fn record_bridge_event(bridge: &str, event: &str, detail: &str) {
+    auto_record("active_work", &format!(
+        "Bridge {bridge} {event}: {detail}"
+    ));
+}
+
+/// Record a bridge command received.
+pub fn record_bridge_command(bridge: &str, user: &str, cmd: &str, args: &str) {
+    let args_note = if args.is_empty() {
+        String::new()
+    } else {
+        format!(" {args}")
+    };
+    auto_record("insight", &format!(
+        "Bridge {bridge} command from @{user}: {cmd}{args_note}"
+    ));
+}
+
+/// Record a bridge command response.
+pub fn record_bridge_response(bridge: &str, cmd: &str, response: &str) {
+    auto_record("insight", &format!(
+        "Bridge {bridge} response to {cmd}: {}",
+        truncate(response, 100)
+    ));
+}
+
 fn auto_record(entry_type: &str, content: &str) {
     let gc = GlobalConfig::load();
     let Some(scl_cfg) = gc.scl() else { return };

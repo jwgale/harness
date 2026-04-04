@@ -707,3 +707,30 @@ fn test_vault_status_disabled() {
     assert!(ok, "vault status failed: {stdout}");
     assert!(stdout.contains("disabled") || stdout.contains("enabled"));
 }
+
+#[test]
+fn test_bridge_telegram_status() {
+    // Should show bridge status without crashing (vault likely disabled in test)
+    let (stdout, stderr, _ok) = run_harness(&["bridge", "telegram", "status"]);
+    let combined = format!("{stdout}{stderr}");
+    // Should mention bridge state or credential status
+    assert!(
+        combined.contains("not running")
+            || combined.contains("running")
+            || combined.contains("Vault")
+            || combined.contains("Credentials"),
+        "unexpected output: {combined}"
+    );
+}
+
+#[test]
+fn test_bridge_telegram_help() {
+    // Verify the subcommand is registered and shows help
+    let output = Command::new(harness_bin())
+        .args(["bridge", "telegram", "--help"])
+        .output()
+        .expect("Failed to run harness");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    assert!(stdout.contains("start") && stdout.contains("stop") && stdout.contains("status"),
+        "bridge telegram help should list start/stop/status: {stdout}");
+}

@@ -14,3 +14,4 @@ pub mod evaluator_cmd;
 pub mod agent_cmd;
 pub mod workflow_cmd;
 pub mod vault_cmd;
+pub mod bridge_cmd;

@@ -4,11 +4,19 @@ A CLI tool that orchestrates **planner -> builder -> evaluator** loops using sub
 
 Inspired by [Anthropic's harness architecture](https://www.anthropic.com/engineering/harness-design-long-running-apps) for long-running application development with Opus 4.6.
 
-## v0.9.0 Release Notes
+## v0.10.0 Release Notes
 
-Harness v0.9.0 integrates SanctumAI for secure credential management.
+Harness v0.10.0 adds the Telegram Command Bridge — control Harness from your phone.
 
-**New in v0.9.0:**
+**New in v0.10.0:**
+- **Telegram Command Bridge** — `harness bridge telegram start/status/stop` for chat-based control
+- **Bot Commands** — `/run`, `/status`, `/agent list`, `/vault status` via Telegram
+- **Systemd-Managed** — bridge runs as a background service with auto-restart
+- **Vault-Only Credentials** — bot token and chat ID pulled exclusively from SanctumAI vault
+- **SCL Recording** — every bridge command and response logged to Shared Context Layer
+- **30 Integration Tests** — including bridge status and help tests
+
+**v0.9.0:**
 - **SanctumAI Vault** — `harness vault init/status/add/list` for Ed25519-authenticated credential management
 - **Vault-Aware Notifications** — Slack, Telegram, email, and webhook credentials auto-resolve from vault before config fallback
 - **Ed25519 Agent Identity** — auto-generated signing key for vault authentication
@@ -127,6 +135,9 @@ harness evaluate --backend claude
 | `harness vault status` | Show vault connection status |
 | `harness vault add <name>` | Store a credential in the vault |
 | `harness vault list` | List credentials in the vault |
+| `harness bridge telegram start` | Start the Telegram bot bridge (systemd-managed) |
+| `harness bridge telegram status` | Show bridge status and credential health |
+| `harness bridge telegram stop` | Stop the Telegram bridge |
 
 ### `harness run` options
 
@@ -543,6 +554,52 @@ harness vault list       # List available credentials
 - **Lease-based access** — retrieved credentials have a 5-minute TTL
 - **Audit trail** — all credential access is logged by the vault
 
+## Telegram Command Bridge
+
+Control Harness from your phone or a Telegram group via a bot bridge.
+
+### Setup
+
+```bash
+# 1. Create a Telegram bot via @BotFather and note the token
+# 2. Get your chat/group ID (send a message, then check https://api.telegram.org/bot<token>/getUpdates)
+
+# 3. Store credentials in the vault
+harness vault add notifications/telegram/bot-token
+# (paste your bot token when prompted)
+harness vault add notifications/telegram/chat-id
+# (paste your chat ID when prompted)
+
+# 4. Start the bridge
+harness bridge telegram start
+```
+
+### Bot Commands
+
+| Command | Description |
+|---------|-------------|
+| `/run <workflow>` | Start a named workflow |
+| `/status` | Show workspaces, schedules, workflows, daemon/bridge state |
+| `/agent list` | List defined agents |
+| `/vault status` | Show vault connection health |
+| `/help` | List available commands |
+
+### Management
+
+```bash
+harness bridge telegram start    # Start bridge (validates credentials first)
+harness bridge telegram status   # Check bridge + credential health
+harness bridge telegram stop     # Stop and disable the bridge
+```
+
+The bridge runs as a systemd user service (`harness-telegram`) with automatic restart on failure. It uses long-polling (no webhooks/ports needed).
+
+All commands and responses are recorded to the Shared Context Layer for audit and cross-session visibility.
+
+### Notifications
+
+When the bridge is running, notification plugins configured for Telegram will send to the same chat. The bridge bot and notification system share the same vault credentials.
+
 ## Multi-Agent Orchestration
 
 Define named agents and compose them into workflows for flexible multi-agent runs.
@@ -858,7 +915,16 @@ Harness is evolving from a thin orchestrator into a full local-first agent platf
 - Well-known credential paths for Slack, Telegram, email, webhook
 - 28 integration tests
 
-**Phase 18: Agent Specialization + Cross-Project Learning**
+**Phase 18: Telegram Command Bridge (done)**
+- `harness bridge telegram start/status/stop` for chat-based control
+- Bot commands: `/run`, `/status`, `/agent list`, `/vault status`, `/help`
+- Systemd-managed background service with auto-restart
+- Vault-only credentials (bot token + chat ID from SanctumAI)
+- SCL records every bridge command and response
+- Long-polling (no webhooks/open ports needed)
+- 30 integration tests
+
+**Phase 19: Agent Specialization + Cross-Project Learning**
 - Agent specialization (frontend, backend, testing)
 - Cross-project learning via Shared Context Layer
 

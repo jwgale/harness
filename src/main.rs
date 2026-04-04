@@ -1,5 +1,6 @@
 mod agents;
 mod artifacts;
+mod bridge;
 mod cli_backend;
 mod commands;
 mod config;
@@ -126,6 +127,11 @@ enum Commands {
     Vault {
         #[command(subcommand)]
         action: VaultAction,
+    },
+    /// External service bridges (Telegram, etc.)
+    Bridge {
+        #[command(subcommand)]
+        action: BridgeAction,
     },
 }
 
@@ -262,6 +268,28 @@ enum EvaluatorAction {
 }
 
 #[derive(Subcommand)]
+enum BridgeAction {
+    /// Telegram bot bridge
+    Telegram {
+        #[command(subcommand)]
+        action: TelegramAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum TelegramAction {
+    /// Start the Telegram bridge (systemd-managed)
+    Start,
+    /// Stop the Telegram bridge
+    Stop,
+    /// Show Telegram bridge status
+    Status,
+    /// Internal: run the listener loop (used by systemd)
+    #[command(hide = true)]
+    InternalListen,
+}
+
+#[derive(Subcommand)]
 enum ContextAction {
     /// Show SCL connection status
     Status,
@@ -357,6 +385,14 @@ fn main() {
         Commands::Workflow { action } => match action {
             WorkflowAction2::List => commands::workflow_cmd::list(),
             WorkflowAction2::Validate { name } => commands::workflow_cmd::validate(&name),
+        },
+        Commands::Bridge { action } => match action {
+            BridgeAction::Telegram { action } => match action {
+                TelegramAction::Start => commands::bridge_cmd::start(),
+                TelegramAction::Stop => commands::bridge_cmd::stop(),
+                TelegramAction::Status => commands::bridge_cmd::status(),
+                TelegramAction::InternalListen => commands::bridge_cmd::internal_listen(),
+            },
         },
         Commands::Vault { action } => match action {
             VaultAction::Init => commands::vault_cmd::init(),
