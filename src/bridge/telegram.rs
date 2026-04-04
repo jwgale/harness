@@ -462,7 +462,15 @@ fn parse_run_args(args: &str) -> (String, bool) {
     (workflow, wait)
 }
 
-/// Wait for a workflow child process, sending live progress updates via socket.
+/// Minimum interval between Telegram messages (rate limit).
+const MIN_SEND_INTERVAL_SECS: u64 = 6;
+
+/// Wait for a workflow child process with event-driven Telegram updates.
+///
+/// Instead of a fixed timer, we send updates immediately on significant events
+/// (step changes, verdicts, loop iterations) while rate-limiting to at most
+/// one message every 6 seconds. Stdout lines are batched and included in the
+/// next send.
 fn wait_for_workflow(
     child: &mut std::process::Child,
     workflow: &str,
@@ -472,28 +480,27 @@ fn wait_for_workflow(
     progress_rx: Option<std::sync::mpsc::Receiver<ProgressMsg>>,
 ) -> String {
     let start = std::time::Instant::now();
-    let mut last_update = std::time::Instant::now();
     let harness_dir = work_dir.join(".harness");
-    // Buffer recent progress messages for periodic Telegram updates
-    let recent_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
-    // Spawn a reader thread for progress socket messages
-    let recent_clone = Arc::clone(&recent_lines);
+    // Buffered lines and event-trigger flag (shared with reader thread)
+    let state = Arc::new(Mutex::new(ProgressBatchState::new()));
+
+    // Spawn reader thread that buffers messages and flags significant events
+    let state_clone = Arc::clone(&state);
     if let Some(rx) = progress_rx {
         thread::spawn(move || {
             while let Ok(msg) = rx.recv() {
-                let line = msg.display_line();
-                if let Ok(mut buf) = recent_clone.lock() {
-                    buf.push(line);
-                    // Keep only last 20 lines
-                    if buf.len() > 20 {
-                        let drain = buf.len() - 20;
-                        buf.drain(..drain);
+                if let Ok(mut s) = state_clone.lock() {
+                    if msg.is_significant() {
+                        s.significant_pending = true;
                     }
+                    s.push(msg.display_line());
                 }
             }
         });
     }
+
+    let mut last_send = std::time::Instant::now() - Duration::from_secs(MIN_SEND_INTERVAL_SECS);
 
     loop {
         // Check if process finished
@@ -516,15 +523,90 @@ fn wait_for_workflow(
             );
         }
 
-        // Send progress update every 30 seconds (faster than before since we have live data)
-        if last_update.elapsed().as_secs() >= 30 {
-            last_update = std::time::Instant::now();
-            let progress = collect_live_progress(workflow, &start, &recent_lines, &harness_dir);
-            let _ = send_message(creds, &progress);
+        // Decide whether to send an update
+        let should_send = if let Ok(s) = state.lock() {
+            let rate_ok = last_send.elapsed().as_secs() >= MIN_SEND_INTERVAL_SECS;
+            let has_data = !s.lines.is_empty();
+            // Send immediately on significant events (if rate allows) or every 30s as fallback
+            (s.significant_pending && rate_ok)
+                || (has_data && last_send.elapsed().as_secs() >= 30)
+        } else {
+            false
+        };
+
+        if should_send {
+            last_send = std::time::Instant::now();
+            let msg = format_batch_update(workflow, &start, &state, &harness_dir);
+            let _ = send_message(creds, &msg);
         }
 
-        thread::sleep(Duration::from_secs(2));
+        thread::sleep(Duration::from_millis(500));
     }
+}
+
+/// Batched progress state shared between reader thread and send loop.
+struct ProgressBatchState {
+    lines: Vec<String>,
+    significant_pending: bool,
+}
+
+impl ProgressBatchState {
+    fn new() -> Self {
+        Self {
+            lines: Vec::new(),
+            significant_pending: false,
+        }
+    }
+
+    fn push(&mut self, line: String) {
+        self.lines.push(line);
+        // Keep last 20 lines
+        if self.lines.len() > 20 {
+            let drain = self.lines.len() - 20;
+            self.lines.drain(..drain);
+        }
+    }
+
+    /// Take a snapshot of recent lines and clear the significant flag.
+    fn take_snapshot(&mut self) -> Vec<String> {
+        self.significant_pending = false;
+        self.lines.clone()
+    }
+}
+
+/// Format a batched Telegram update from the current state.
+fn format_batch_update(
+    workflow: &str,
+    start: &std::time::Instant,
+    state: &Arc<Mutex<ProgressBatchState>>,
+    harness_dir: &std::path::Path,
+) -> String {
+    let elapsed = start.elapsed().as_secs();
+    let mut out = vec![format!("Workflow '{workflow}' running... ({elapsed}s)")];
+
+    let snapshot = if let Ok(mut s) = state.lock() {
+        s.take_snapshot()
+    } else {
+        Vec::new()
+    };
+
+    if snapshot.is_empty() {
+        // Fall back to file-based progress
+        return collect_rich_progress(workflow, start, harness_dir);
+    }
+
+    // Show last 8 lines from the batch
+    out.push(String::new());
+    let start_idx = if snapshot.len() > 8 {
+        snapshot.len() - 8
+    } else {
+        0
+    };
+    for line in &snapshot[start_idx..] {
+        out.push(truncate_line(line, 120));
+    }
+
+    out.join("\n")
 }
 
 /// Background thread: wait for workflow to finish and send result to Telegram.
@@ -629,38 +711,6 @@ fn format_completion_result(
     }
 
     result
-}
-
-/// Collect live progress from socket-buffered messages + file state.
-fn collect_live_progress(
-    workflow: &str,
-    start: &std::time::Instant,
-    recent_lines: &Arc<Mutex<Vec<String>>>,
-    harness_dir: &std::path::Path,
-) -> String {
-    let elapsed = start.elapsed().as_secs();
-    let mut lines = vec![format!("Workflow '{workflow}' running... ({elapsed}s)")];
-
-    // Show recent socket-delivered lines (live agent output)
-    if let Ok(buf) = recent_lines.lock()
-        && !buf.is_empty()
-    {
-        lines.push(String::new());
-        // Show last 8 lines to keep message compact
-        let start_idx = if buf.len() > 8 { buf.len() - 8 } else { 0 };
-        for line in &buf[start_idx..] {
-            lines.push(truncate_line(line, 120));
-        }
-    }
-
-    // Fall back to file-based progress if no socket data
-    if let Ok(buf) = recent_lines.lock()
-        && buf.is_empty()
-    {
-        return collect_rich_progress(workflow, start, harness_dir);
-    }
-
-    lines.join("\n")
 }
 
 /// Collect rich progress info from the harness directory (file-based fallback).

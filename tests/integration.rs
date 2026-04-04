@@ -736,10 +736,11 @@ fn test_bridge_telegram_help() {
 }
 
 #[test]
-fn test_workflow_progress_log() {
-    // Verify that running a workflow with --no-tui writes progress.log
-    let tmp = tempdir("progresslog");
-    run_harness_in(&tmp, &["init", "Progress log test"]);
+fn test_workflow_progress_socket() {
+    // Verify workflows complete cleanly without a progress socket (graceful fallback).
+    // The socket protocol itself is tested via unit tests (test_socket_roundtrip, test_multiple_clients).
+    let tmp = tempdir("progresssock");
+    run_harness_in(&tmp, &["init", "Progress socket test"]);
     fs::write(tmp.join(".harness/spec.md"), "# Test Spec").unwrap();
 
     let agents_dir = dirs::config_dir()
@@ -761,19 +762,24 @@ agent = "prog-planner"
 agent = "prog-builder"
 "#).unwrap();
 
-    let (_stdout, _stderr, ok) = run_harness_in(&tmp, &[
+    // Run without socket — should complete cleanly (no progress.log written)
+    let (stdout, stderr, ok) = run_harness_in(&tmp, &[
         "run", "--workflow", "prog-flow", "--no-tui",
     ]);
-    assert!(ok, "workflow should succeed");
+    assert!(ok, "workflow should succeed without socket: {stdout} {stderr}");
 
-    // Check that progress.log was written
-    let progress_path = tmp.join(".harness/progress.log");
-    assert!(progress_path.exists(), "progress.log should exist");
-    let content = fs::read_to_string(&progress_path).unwrap();
-    assert!(content.contains("prog-flow"), "progress.log should mention workflow name: {content}");
-    assert!(content.contains("prog-planner"), "progress.log should mention planner: {content}");
-    assert!(content.contains("prog-builder"), "progress.log should mention builder: {content}");
-    assert!(content.contains("completed"), "progress.log should contain completion: {content}");
+    // Verify artifacts were written (proof workflow ran)
+    assert!(tmp.join(".harness/spec.md").exists());
+    assert!(tmp.join(".harness/status.md").exists());
+
+    // Also verify that setting a bogus socket path doesn't crash the runner
+    let output = Command::new(harness_bin())
+        .args(["run", "--workflow", "prog-flow", "--no-tui"])
+        .current_dir(&tmp)
+        .env("HARNESS_PROGRESS_SOCK", "/tmp/nonexistent-harness-sock")
+        .output()
+        .expect("Failed to run harness");
+    assert!(output.status.success(), "workflow should succeed with bogus socket path");
 
     fs::remove_file(agents_dir.join("prog-planner.toml")).ok();
     fs::remove_file(agents_dir.join("prog-builder.toml")).ok();

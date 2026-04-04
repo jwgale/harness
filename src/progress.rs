@@ -10,8 +10,8 @@
 //!   STDOUT:<agent>:<line> — raw agent stdout line
 //!   DONE:<summary>        — workflow finished
 //!
-//! If the socket doesn't exist or connection fails, the runner falls back to
-//! file-based `progress.log` only.
+//! The listener accepts multiple client connections (broadcast model) and
+//! writes all received messages to `.harness/progress.log` as an audit trail.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -65,7 +65,6 @@ impl ProgressSender {
 
     fn write_line(&self, msg: &str) {
         if let Ok(mut stream) = self.stream.lock() {
-            // Best-effort write — never block or crash the runner
             let _ = stream.write_all(msg.as_bytes());
             let _ = stream.write_all(b"\n");
             let _ = stream.flush();
@@ -97,7 +96,8 @@ impl ProgressMsg {
             let (agent, content) = rest.split_once(':').unwrap_or(("?", rest));
             Some(Self::Stdout(agent.to_string(), content.to_string()))
         } else {
-            line.strip_prefix("DONE:").map(|rest| Self::Done(rest.to_string()))
+            line.strip_prefix("DONE:")
+                .map(|rest| Self::Done(rest.to_string()))
         }
     }
 
@@ -109,70 +109,113 @@ impl ProgressMsg {
             Self::Done(s) => format!("Done: {s}"),
         }
     }
+
+    /// Whether this is a significant event that should trigger an immediate Telegram send.
+    pub fn is_significant(&self) -> bool {
+        matches!(self, Self::Event(_) | Self::Done(_))
+    }
 }
 
-/// Creates a Unix socket listener, accepts one connection, and forwards
-/// parsed messages to an mpsc channel. Runs in a background thread.
+/// Creates a Unix socket listener that accepts multiple client connections,
+/// forwards parsed messages to an mpsc channel, and writes all messages to
+/// `progress.log` as an audit trail.
 ///
 /// Returns (socket_path, message_receiver).
 pub fn create_listener(
     harness_dir: &Path,
 ) -> Result<(PathBuf, mpsc::Receiver<ProgressMsg>), String> {
     let sock_path = harness_dir.join("progress.sock");
+    let log_path = harness_dir.join("progress.log");
 
-    // Remove stale socket if it exists
+    // Remove stale socket and clear log
     let _ = std::fs::remove_file(&sock_path);
+    let _ = std::fs::write(&log_path, "");
 
     let listener = UnixListener::bind(&sock_path)
         .map_err(|e| format!("Failed to create progress socket: {e}"))?;
-
-    // Set a timeout so accept() doesn't block forever if the runner never connects
-    let _ = listener.set_nonblocking(false);
 
     let (tx, rx) = mpsc::channel();
     let path_clone = sock_path.clone();
 
     thread::spawn(move || {
-        // Accept one connection (from the runner)
-        // Use a timeout so we give up if no connection arrives
+        // Accept connections in a loop (supports multiple clients)
         let _ = listener.set_nonblocking(true);
 
-        let mut stream = None;
-        // Try to accept for up to 30 seconds
-        for _ in 0..300 {
+        let mut client_threads: Vec<thread::JoinHandle<()>> = Vec::new();
+
+        // Keep accepting for up to 10 minutes (well beyond any workflow timeout)
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+
+        loop {
+            if std::time::Instant::now() > deadline {
+                break;
+            }
+
             match listener.accept() {
-                Ok((s, _)) => {
-                    stream = Some(s);
-                    break;
+                Ok((stream, _)) => {
+                    let tx = tx.clone();
+                    let log = log_path.clone();
+                    let handle = thread::spawn(move || {
+                        handle_client(stream, tx, &log);
+                    });
+                    client_threads.push(handle);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(std::time::Duration::from_millis(100));
+                    // No pending connection — check if all clients have disconnected
+                    // and at least one has connected (workflow is done)
+                    client_threads.retain(|h| !h.is_finished());
+                    // Brief sleep to avoid busy-loop
+                    thread::sleep(std::time::Duration::from_millis(50));
                 }
                 Err(_) => break,
             }
         }
 
-        let Some(stream) = stream else {
-            // No connection — runner probably doesn't support progress socket
-            let _ = std::fs::remove_file(&path_clone);
-            return;
-        };
-
-        let reader = BufReader::new(stream);
-        for line in reader.lines() {
-            let Ok(line) = line else { break };
-            if let Some(msg) = ProgressMsg::parse(&line)
-                && tx.send(msg).is_err()
-            {
-                break; // receiver dropped
-            }
+        // Wait for remaining client threads
+        for h in client_threads {
+            let _ = h.join();
         }
 
-        // Clean up
+        // Clean up socket
         let _ = std::fs::remove_file(&path_clone);
     });
 
     Ok((sock_path, rx))
+}
+
+/// Handle a single client connection: read lines, parse, forward, and log.
+fn handle_client(stream: UnixStream, tx: mpsc::Sender<ProgressMsg>, log_path: &Path) {
+    let reader = BufReader::new(stream);
+    for line in reader.lines() {
+        let Ok(line) = line else { break };
+
+        // Write to progress.log audit trail
+        append_to_log(log_path, &line);
+
+        // Parse and forward to channel
+        if let Some(msg) = ProgressMsg::parse(&line)
+            && tx.send(msg).is_err()
+        {
+            break; // receiver dropped
+        }
+    }
+}
+
+/// Append a raw line to the progress log file.
+fn append_to_log(log_path: &Path, raw_line: &str) {
+    let timestamp = chrono::Local::now().format("%H:%M:%S");
+    // For STDOUT lines, just write the display form to keep the log readable
+    let display = if let Some(msg) = ProgressMsg::parse(raw_line) {
+        msg.display_line()
+    } else {
+        raw_line.to_string()
+    };
+    let entry = format!("[{timestamp}] {display}\n");
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .and_then(|mut f| f.write_all(entry.as_bytes()));
 }
 
 // ---------------------------------------------------------------------------
@@ -202,7 +245,6 @@ mod tests {
 
     #[test]
     fn test_parse_stdout_with_colons() {
-        // Content can contain colons
         let msg = ProgressMsg::parse("STDOUT:agent:key: value: extra").unwrap();
         if let ProgressMsg::Stdout(agent, line) = msg {
             assert_eq!(agent, "agent");
@@ -237,6 +279,13 @@ mod tests {
     }
 
     #[test]
+    fn test_is_significant() {
+        assert!(ProgressMsg::Event("step".into()).is_significant());
+        assert!(ProgressMsg::Done("ok".into()).is_significant());
+        assert!(!ProgressMsg::Stdout("a".into(), "b".into()).is_significant());
+    }
+
+    #[test]
     fn test_socket_roundtrip() {
         let tmp = std::env::temp_dir().join(format!(
             "harness-progress-test-{}",
@@ -254,7 +303,7 @@ mod tests {
         sender.event("step started");
         sender.stdout("builder", "compiling main.rs");
         sender.done("completed");
-        drop(sender); // close connection
+        drop(sender);
 
         // Read messages
         thread::sleep(std::time::Duration::from_millis(100));
@@ -265,8 +314,50 @@ mod tests {
 
         assert!(msgs.len() >= 3, "expected 3 msgs, got {}", msgs.len());
         assert!(matches!(&msgs[0], ProgressMsg::Event(s) if s == "step started"));
-        assert!(matches!(&msgs[1], ProgressMsg::Stdout(a, l) if a == "builder" && l == "compiling main.rs"));
+        assert!(
+            matches!(&msgs[1], ProgressMsg::Stdout(a, l) if a == "builder" && l == "compiling main.rs")
+        );
         assert!(matches!(&msgs[2], ProgressMsg::Done(s) if s == "completed"));
+
+        // Verify progress.log was written by the listener
+        let log_path = tmp.join("progress.log");
+        let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+        assert!(log.contains("step started"), "log should contain events: {log}");
+        assert!(
+            log.contains("[builder] compiling main.rs"),
+            "log should contain stdout: {log}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_multiple_clients() {
+        let tmp = std::env::temp_dir().join(format!(
+            "harness-progress-multi-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let (sock_path, rx) = create_listener(&tmp).unwrap();
+        thread::sleep(std::time::Duration::from_millis(50));
+
+        // Connect two clients
+        let s1 = ProgressSender::connect(&sock_path).expect("client 1");
+        let s2 = ProgressSender::connect(&sock_path).expect("client 2");
+
+        s1.event("from client 1");
+        s2.event("from client 2");
+        drop(s1);
+        drop(s2);
+
+        thread::sleep(std::time::Duration::from_millis(200));
+        let mut msgs = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            msgs.push(msg);
+        }
+
+        assert!(msgs.len() >= 2, "expected 2 msgs, got {}", msgs.len());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

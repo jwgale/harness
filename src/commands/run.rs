@@ -182,18 +182,15 @@ pub fn run_multi_agent(
         scl_lifecycle::record_agent_run_start(&config.project_name, &name_refs);
 
         println!("Running workflow '{}' ({} groups from {} steps)", wf.name, groups.len(), wf.steps.len());
-        artifacts::clear_progress_log();
-        let start_msg = format!("Workflow '{}' started ({} steps)", wf.name, wf.steps.len());
-        artifacts::append_progress(&start_msg);
-        if let Some(ref ps) = progress { ps.event(&start_msg); }
+        if let Some(ref ps) = progress {
+            ps.event(&format!("Workflow '{}' started ({} steps)", wf.name, wf.steps.len()));
+        }
 
         let result = run_step_groups(&groups, backend_override, &config, &pm, progress.as_ref());
 
         let status = if result.is_ok() { "completed" } else { "FAIL" };
         scl_lifecycle::record_agent_run_end(&config.project_name, &name_refs, status);
-        let done_msg = format!("Workflow '{}' {status}", wf.name);
-        artifacts::append_progress(&done_msg);
-        if let Some(ref ps) = progress { ps.done(&done_msg); }
+        if let Some(ref ps) = progress { ps.done(&format!("Workflow '{}' {status}", wf.name)); }
         println!("\n=== Workflow '{}' {status} ===", wf.name);
         return result;
     }
@@ -282,11 +279,9 @@ pub fn run_step_groups_with_tui(
                 }
                 println!("\n--- Group {}/{}: agent '{}' ---", gi + 1, groups.len(), step.agent);
                 let msg = format!("Step {}/{}: agent '{}' started", gi + 1, groups.len(), step.agent);
-                artifacts::append_progress(&msg);
                 if let Some(ps) = progress { ps.event(&msg); }
                 run_single_step_streaming(step, backend_override, config, pm, tui_tx, progress)?;
                 let msg = format!("Step {}/{}: agent '{}' done", gi + 1, groups.len(), step.agent);
-                artifacts::append_progress(&msg);
                 if let Some(ps) = progress { ps.event(&msg); }
             }
             workflows::StepGroup::Parallel(steps) => {
@@ -299,13 +294,11 @@ pub fn run_step_groups_with_tui(
                 }
                 println!("\n--- Group {}/{}: parallel [{}] ---", gi + 1, groups.len(), names.join(", "));
                 let msg = format!("Parallel batch: [{}]", names.join(", "));
-                artifacts::append_progress(&msg);
                 if let Some(ps) = progress { ps.event(&msg); }
                 scl_lifecycle::record_parallel_start(&config.project_name, &names);
                 run_parallel_steps(steps, backend_override, config, pm, tui_tx, progress)?;
                 scl_lifecycle::record_parallel_end(&config.project_name, &names);
                 let msg = format!("Parallel batch done: [{}]", names.join(", "));
-                artifacts::append_progress(&msg);
                 if let Some(ps) = progress { ps.event(&msg); }
             }
             workflows::StepGroup::Loop { body, evaluator, max_rounds } => {
@@ -359,7 +352,7 @@ fn run_single_step_streaming(
             artifacts::write_artifact("spec.md", &output)?;
             pm.fire(HookPoint::AfterPlan);
             scl_lifecycle::record_agent_step(&config.project_name, &agent.name, "planner", "completed");
-            artifacts::append_progress(&format!("Planner '{}' done -- spec.md written", agent.name));
+            if let Some(ps) = progress { ps.event(&format!("Planner '{}' done -- spec.md written", agent.name)); }
             println!("  Plan written to .harness/spec.md");
             Ok(None)
         }
@@ -368,7 +361,7 @@ fn run_single_step_streaming(
             artifacts::write_artifact("status.md", &output)?;
             pm.fire(HookPoint::AfterBuild);
             scl_lifecycle::record_agent_step(&config.project_name, &agent.name, "builder", "completed");
-            artifacts::append_progress(&format!("Builder '{}' done", agent.name));
+            if let Some(ps) = progress { ps.event(&format!("Builder '{}' done", agent.name)); }
             println!("  Build complete.");
             Ok(None)
         }
@@ -385,7 +378,7 @@ fn run_single_step_streaming(
                 &format!("{verdict:?}"),
             );
             notifications::fire_eval_event(&verdict, &config.project_name, fb_round);
-            artifacts::append_progress(&format!("Evaluator '{}' verdict: {verdict:?}", agent.name));
+            if let Some(ps) = progress { ps.event(&format!("Evaluator '{}' verdict: {verdict:?}", agent.name)); }
             println!("  Verdict: {verdict:?}");
 
             match &verdict {
@@ -403,7 +396,7 @@ fn run_single_step_streaming(
                 .unwrap_or(&default_artifact);
             artifacts::write_artifact(artifact_name, &output)?;
             scl_lifecycle::record_agent_step(&config.project_name, &agent.name, "custom", "completed");
-            artifacts::append_progress(&format!("Agent '{}' done -- {artifact_name}", agent.name));
+            if let Some(ps) = progress { ps.event(&format!("Agent '{}' done -- {artifact_name}", agent.name)); }
             println!("  Output written to .harness/{artifact_name}");
             Ok(None)
         }
@@ -619,7 +612,6 @@ fn run_iterative_loop(
         }
         println!("\n  === Iteration {round}/{max_rounds} ===");
         let msg = format!("Loop iteration {round}/{max_rounds}");
-        artifacts::append_progress(&msg);
         if let Some(ps) = progress { ps.event(&msg); }
 
         for step in body {
@@ -633,14 +625,12 @@ fn run_iterative_loop(
         match verdict {
             Some(Verdict::Pass) => {
                 let msg = format!("Loop completed: PASS (round {round})");
-                artifacts::append_progress(&msg);
                 if let Some(ps) = progress { ps.event(&msg); }
                 println!("  Loop completed: PASS on round {round}");
                 return Ok(());
             }
             Some(Verdict::Fail) => {
                 let msg = format!("Loop failed: FAIL (round {round})");
-                artifacts::append_progress(&msg);
                 if let Some(ps) = progress { ps.event(&msg); }
                 return Err(format!("Loop failed: FAIL on round {round}"));
             }

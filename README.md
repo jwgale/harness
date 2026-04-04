@@ -4,16 +4,22 @@ A CLI tool that orchestrates **planner -> builder -> evaluator** loops using sub
 
 Inspired by [Anthropic's harness architecture](https://www.anthropic.com/engineering/harness-design-long-running-apps) for long-running application development with Opus 4.6.
 
-## v0.11.0 Release Notes
+## v0.11.1 Release Notes
 
-Harness v0.11.0 upgrades the progress protocol to sub-second updates via Unix domain sockets with raw agent stdout capture.
+Harness v0.11.1 polishes the Telegram progress protocol for production use.
 
-**New in v0.11.0:**
+**New in v0.11.1:**
+- **Event-Driven Telegram Updates** — sends immediately on significant events (step change, verdict, loop iteration) instead of fixed timer; rate-limited to ~1 msg per 6 seconds
+- **Multi-Client Socket** — progress listener now accepts multiple concurrent connections (broadcast model) for future parallel workflow support
+- **Listener-Side Audit Trail** — `progress.log` is now written only by the socket listener, removing dual writes from the runner; cleaner separation of concerns
+- **Smart Batching** — STDOUT lines are batched and included in the next significant-event send; no wasted messages on raw output alone
+- **24 Unit Tests + 31 Integration Tests** — including multi-client socket test and bogus-socket fallback
+
+**v0.11.0:**
 - **Unix Socket Progress** — bridge creates `.harness/progress.sock`; runner streams `EVENT:`, `STDOUT:`, and `DONE:` messages in real time (sub-second latency)
 - **Raw Agent Stdout** — non-TUI runner now uses streaming mode when progress socket is available, forwarding every agent output line with agent-name prefix
-- **Live Stdout in Telegram** — `/run --wait` shows raw agent output lines like `[my-builder] Compiling main.rs...` as they happen (30s update interval)
-- **Automatic Fallback** — if socket creation fails, falls back to file-based `progress.log` polling (Phase 21 behavior)
-- **22 Unit Tests + 31 Integration Tests** — including socket roundtrip verification
+- **Live Stdout in Telegram** — `/run --wait` shows raw agent output lines as they happen
+- **Automatic Fallback** — if socket creation fails, falls back to file-based `progress.log` polling
 
 **v0.10.3:**
 - **Real-time Progress Protocol** — multi-agent runner writes timestamped progress to `.harness/progress.log` as agents execute; bridge polls this for live updates
@@ -1056,7 +1062,14 @@ Harness is evolving from a thin orchestrator into a full local-first agent platf
 - Automatic fallback to file-based `progress.log` when socket unavailable
 - 22 unit tests + 31 integration tests
 
-**Phase 23: Agent Specialization + Cross-Project Learning**
+**Phase 23: Final Telegram + Progress Protocol Polish (done)**
+- Event-driven smart batching: send on significant events, rate-limited to 1 msg / 6s
+- Multi-client socket listener with thread-per-connection
+- progress.log written by listener only (removed dual writes from runner)
+- Removed `append_progress`/`clear_progress_log` from artifacts module
+- 24 unit tests + 31 integration tests
+
+**Phase 24: Agent Specialization + Cross-Project Learning**
 - Agent specialization (frontend, backend, testing)
 - Cross-project learning via Shared Context Layer
 
