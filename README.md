@@ -4,16 +4,21 @@ A CLI tool that orchestrates **planner -> builder -> evaluator** loops using sub
 
 Inspired by [Anthropic's harness architecture](https://www.anthropic.com/engineering/harness-design-long-running-apps) for long-running application development with Opus 4.6.
 
-## v0.11.1 Release Notes
+## v0.11.2 Release Notes
 
-Harness v0.11.1 polishes the Telegram progress protocol for production use.
+Harness v0.11.2 completes the Telegram progress protocol with clean lifecycle management.
 
-**New in v0.11.1:**
-- **Event-Driven Telegram Updates** — sends immediately on significant events (step change, verdict, loop iteration) instead of fixed timer; rate-limited to ~1 msg per 6 seconds
-- **Multi-Client Socket** — progress listener now accepts multiple concurrent connections (broadcast model) for future parallel workflow support
-- **Listener-Side Audit Trail** — `progress.log` is now written only by the socket listener, removing dual writes from the runner; cleaner separation of concerns
-- **Smart Batching** — STDOUT lines are batched and included in the next significant-event send; no wasted messages on raw output alone
-- **24 Unit Tests + 31 Integration Tests** — including multi-client socket test and bogus-socket fallback
+**New in v0.11.2:**
+- **Listener Shutdown Signal** — `ListenerHandle` with `Drop` impl that signals shutdown via `AtomicBool`; no more hard 10-minute timeout. Socket cleaned up automatically when the bridge is done
+- **Priority Progress Buffer** — EVENT/DONE lines always kept; only STDOUT lines are evicted when the buffer is full. Verbose agents can't push out lifecycle events
+- **Configurable Buffer Size** — `progress_buffer_size` in `[bridge]` config (default: 50 lines)
+- **27 Unit Tests + 31 Integration Tests** — including priority buffer and shutdown tests
+
+**v0.11.1:**
+- **Event-Driven Telegram Updates** — sends immediately on significant events instead of fixed timer; rate-limited to ~1 msg per 6 seconds
+- **Multi-Client Socket** — progress listener now accepts multiple concurrent connections
+- **Listener-Side Audit Trail** — `progress.log` written only by the socket listener
+- **Smart Batching** — STDOUT lines batched and included in next significant-event send
 
 **v0.11.0:**
 - **Unix Socket Progress** — bridge creates `.harness/progress.sock`; runner streams `EVENT:`, `STDOUT:`, and `DONE:` messages in real time (sub-second latency)
@@ -680,6 +685,7 @@ workflow_timeout_minutes = 45       # max runtime for bridge-triggered workflows
 | `strict_policy_mode` | `false` | When `true`, missing policy responses deny by default |
 | `require_policy_endpoint` | `false` | When `true`, vault must implement `_policy` or commands are denied |
 | `workflow_timeout_minutes` | `30` | Max runtime for `/run` triggered workflows |
+| `progress_buffer_size` | `50` | Max lines in progress buffer (EVENT lines prioritized over STDOUT) |
 
 Per-workflow timeouts override the global setting:
 
@@ -1069,7 +1075,14 @@ Harness is evolving from a thin orchestrator into a full local-first agent platf
 - Removed `append_progress`/`clear_progress_log` from artifacts module
 - 24 unit tests + 31 integration tests
 
-**Phase 24: Agent Specialization + Cross-Project Learning**
+**Phase 24: Final Progress Protocol + Listener Shutdown Polish (done)**
+- `ListenerHandle` with `Drop`-based shutdown via `AtomicBool` — no hard timeout
+- Priority progress buffer: EVENT/DONE always kept, STDOUT evicted first
+- Configurable `progress_buffer_size` (default: 50 lines)
+- Client read timeout + shutdown check for clean thread exit
+- 27 unit tests + 31 integration tests
+
+**Phase 25: Agent Specialization + Cross-Project Learning**
 - Agent specialization (frontend, backend, testing)
 - Cross-project learning via Shared Context Layer
 

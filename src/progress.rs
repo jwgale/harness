@@ -1,22 +1,25 @@
 //! Real-time progress protocol over Unix domain sockets.
 //!
-//! The Telegram bridge (or any external watcher) creates a `ProgressListener`
-//! which binds a Unix socket at `.harness/progress.sock`. It then spawns the
-//! runner with `HARNESS_PROGRESS_SOCK` set to that path. The runner connects
-//! via `ProgressSender` and pushes lines in real time.
+//! The Telegram bridge (or any external watcher) creates a listener via
+//! `create_listener()` which binds a Unix socket at `.harness/progress.sock`.
+//! It spawns the runner with `HARNESS_PROGRESS_SOCK` set to that path. The
+//! runner connects via `ProgressSender` and pushes lines in real time.
 //!
 //! Message format (one per line, newline-terminated):
 //!   EVENT:<content>       — lifecycle event (step start/complete, verdict, etc.)
 //!   STDOUT:<agent>:<line> — raw agent stdout line
 //!   DONE:<summary>        — workflow finished
 //!
-//! The listener accepts multiple client connections (broadcast model) and
-//! writes all received messages to `.harness/progress.log` as an audit trail.
+//! The listener accepts multiple client connections, forwards parsed messages
+//! to an mpsc channel, and writes all messages to `progress.log` as an audit
+//! trail. The listener shuts down cleanly via an `Arc<AtomicBool>` shutdown
+//! signal — no hard timeout.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread;
 
 /// Environment variable name for the progress socket path.
@@ -41,7 +44,6 @@ impl ProgressSender {
     /// Connect to a specific socket path.
     pub fn connect(path: &Path) -> Option<Self> {
         let stream = UnixStream::connect(path).ok()?;
-        // Set a short write timeout so we never block the runner
         let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(100)));
         Some(Self {
             stream: std::sync::Mutex::new(stream),
@@ -73,7 +75,7 @@ impl ProgressSender {
 }
 
 // ---------------------------------------------------------------------------
-// Listener (used by the bridge / external watcher)
+// Messages
 // ---------------------------------------------------------------------------
 
 /// A parsed progress message from the runner.
@@ -116,38 +118,68 @@ impl ProgressMsg {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Listener
+// ---------------------------------------------------------------------------
+
+/// Handle returned by `create_listener`. Drop it to signal shutdown.
+pub struct ListenerHandle {
+    shutdown: Arc<AtomicBool>,
+    sock_path: PathBuf,
+}
+
+impl ListenerHandle {
+    /// Signal the listener to shut down and clean up the socket.
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+    }
+
+    /// Get the socket path (for passing via env var).
+    pub fn sock_path(&self) -> &Path {
+        &self.sock_path
+    }
+}
+
+impl Drop for ListenerHandle {
+    fn drop(&mut self) {
+        self.shutdown();
+        // Give listener thread a moment to clean up
+        thread::sleep(std::time::Duration::from_millis(100));
+        // Ensure socket is removed even if listener thread didn't get to it
+        let _ = std::fs::remove_file(&self.sock_path);
+    }
+}
+
 /// Creates a Unix socket listener that accepts multiple client connections,
 /// forwards parsed messages to an mpsc channel, and writes all messages to
-/// `progress.log` as an audit trail.
+/// `progress.log` as an audit trail. Shuts down cleanly when the returned
+/// `ListenerHandle` is dropped or `shutdown()` is called.
 ///
-/// Returns (socket_path, message_receiver).
+/// Returns (handle, message_receiver).
 pub fn create_listener(
     harness_dir: &Path,
-) -> Result<(PathBuf, mpsc::Receiver<ProgressMsg>), String> {
+) -> Result<(ListenerHandle, mpsc::Receiver<ProgressMsg>), String> {
     let sock_path = harness_dir.join("progress.sock");
     let log_path = harness_dir.join("progress.log");
 
-    // Remove stale socket and clear log
     let _ = std::fs::remove_file(&sock_path);
     let _ = std::fs::write(&log_path, "");
 
     let listener = UnixListener::bind(&sock_path)
         .map_err(|e| format!("Failed to create progress socket: {e}"))?;
 
+    let shutdown = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel();
+
+    let shutdown_clone = Arc::clone(&shutdown);
     let path_clone = sock_path.clone();
 
     thread::spawn(move || {
-        // Accept connections in a loop (supports multiple clients)
         let _ = listener.set_nonblocking(true);
-
         let mut client_threads: Vec<thread::JoinHandle<()>> = Vec::new();
 
-        // Keep accepting for up to 10 minutes (well beyond any workflow timeout)
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
-
         loop {
-            if std::time::Instant::now() > deadline {
+            if shutdown_clone.load(Ordering::Acquire) {
                 break;
             }
 
@@ -155,48 +187,57 @@ pub fn create_listener(
                 Ok((stream, _)) => {
                     let tx = tx.clone();
                     let log = log_path.clone();
+                    let shut = Arc::clone(&shutdown_clone);
                     let handle = thread::spawn(move || {
-                        handle_client(stream, tx, &log);
+                        handle_client(stream, tx, &log, &shut);
                     });
                     client_threads.push(handle);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // No pending connection — check if all clients have disconnected
-                    // and at least one has connected (workflow is done)
                     client_threads.retain(|h| !h.is_finished());
-                    // Brief sleep to avoid busy-loop
                     thread::sleep(std::time::Duration::from_millis(50));
                 }
                 Err(_) => break,
             }
         }
 
-        // Wait for remaining client threads
         for h in client_threads {
             let _ = h.join();
         }
-
-        // Clean up socket
         let _ = std::fs::remove_file(&path_clone);
     });
 
-    Ok((sock_path, rx))
+    let handle = ListenerHandle {
+        shutdown,
+        sock_path,
+    };
+
+    Ok((handle, rx))
 }
 
 /// Handle a single client connection: read lines, parse, forward, and log.
-fn handle_client(stream: UnixStream, tx: mpsc::Sender<ProgressMsg>, log_path: &Path) {
+fn handle_client(
+    stream: UnixStream,
+    tx: mpsc::Sender<ProgressMsg>,
+    log_path: &Path,
+    shutdown: &AtomicBool,
+) {
+    // Set a read timeout so we can check the shutdown flag periodically
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
     let reader = BufReader::new(stream);
+
     for line in reader.lines() {
+        if shutdown.load(Ordering::Acquire) {
+            break;
+        }
         let Ok(line) = line else { break };
 
-        // Write to progress.log audit trail
         append_to_log(log_path, &line);
 
-        // Parse and forward to channel
         if let Some(msg) = ProgressMsg::parse(&line)
             && tx.send(msg).is_err()
         {
-            break; // receiver dropped
+            break;
         }
     }
 }
@@ -204,7 +245,6 @@ fn handle_client(stream: UnixStream, tx: mpsc::Sender<ProgressMsg>, log_path: &P
 /// Append a raw line to the progress log file.
 fn append_to_log(log_path: &Path, raw_line: &str) {
     let timestamp = chrono::Local::now().format("%H:%M:%S");
-    // For STDOUT lines, just write the display form to keep the log readable
     let display = if let Some(msg) = ProgressMsg::parse(raw_line) {
         msg.display_line()
     } else {
@@ -293,19 +333,16 @@ mod tests {
         ));
         std::fs::create_dir_all(&tmp).unwrap();
 
-        let (sock_path, rx) = create_listener(&tmp).unwrap();
+        let (handle, rx) = create_listener(&tmp).unwrap();
 
-        // Give listener thread time to start
         thread::sleep(std::time::Duration::from_millis(50));
 
-        // Connect and send
-        let sender = ProgressSender::connect(&sock_path).expect("should connect");
+        let sender = ProgressSender::connect(handle.sock_path()).expect("should connect");
         sender.event("step started");
         sender.stdout("builder", "compiling main.rs");
         sender.done("completed");
         drop(sender);
 
-        // Read messages
         thread::sleep(std::time::Duration::from_millis(100));
         let mut msgs = Vec::new();
         while let Ok(msg) = rx.try_recv() {
@@ -319,15 +356,14 @@ mod tests {
         );
         assert!(matches!(&msgs[2], ProgressMsg::Done(s) if s == "completed"));
 
-        // Verify progress.log was written by the listener
-        let log_path = tmp.join("progress.log");
-        let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-        assert!(log.contains("step started"), "log should contain events: {log}");
-        assert!(
-            log.contains("[builder] compiling main.rs"),
-            "log should contain stdout: {log}"
-        );
+        // Verify progress.log was written
+        let log = std::fs::read_to_string(tmp.join("progress.log")).unwrap_or_default();
+        assert!(log.contains("step started"));
+        assert!(log.contains("[builder] compiling main.rs"));
 
+        // Clean shutdown
+        handle.shutdown();
+        thread::sleep(std::time::Duration::from_millis(200));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -339,12 +375,11 @@ mod tests {
         ));
         std::fs::create_dir_all(&tmp).unwrap();
 
-        let (sock_path, rx) = create_listener(&tmp).unwrap();
+        let (handle, rx) = create_listener(&tmp).unwrap();
         thread::sleep(std::time::Duration::from_millis(50));
 
-        // Connect two clients
-        let s1 = ProgressSender::connect(&sock_path).expect("client 1");
-        let s2 = ProgressSender::connect(&sock_path).expect("client 2");
+        let s1 = ProgressSender::connect(handle.sock_path()).expect("client 1");
+        let s2 = ProgressSender::connect(handle.sock_path()).expect("client 2");
 
         s1.event("from client 1");
         s2.event("from client 2");
@@ -358,6 +393,27 @@ mod tests {
         }
 
         assert!(msgs.len() >= 2, "expected 2 msgs, got {}", msgs.len());
+
+        handle.shutdown();
+        thread::sleep(std::time::Duration::from_millis(100));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_shutdown_cleans_socket() {
+        let tmp = std::env::temp_dir().join(format!(
+            "harness-progress-shutdown-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let (handle, _rx) = create_listener(&tmp).unwrap();
+        let sock = tmp.join("progress.sock");
+        assert!(sock.exists(), "socket should exist after create");
+
+        drop(handle); // triggers shutdown + cleanup
+        thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!sock.exists(), "socket should be removed after drop");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

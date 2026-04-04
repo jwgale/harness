@@ -35,10 +35,11 @@ pub struct BridgeConfig {
     /// When true, unknown/unimplemented policies deny by default (default: false)
     pub strict_policy_mode: Option<bool>,
     /// When true, require vault to implement the _policy endpoint (default: false).
-    /// When false, a missing _policy endpoint is silently ignored.
     pub require_policy_endpoint: Option<bool>,
     /// Default workflow timeout in minutes for bridge-triggered runs (default: 30)
     pub workflow_timeout_minutes: Option<u64>,
+    /// Max lines in the progress buffer for Telegram updates (default: 50)
+    pub progress_buffer_size: Option<usize>,
 }
 
 impl BridgeConfig {
@@ -52,6 +53,10 @@ impl BridgeConfig {
 
     pub fn workflow_timeout_minutes(&self) -> u64 {
         self.workflow_timeout_minutes.unwrap_or(30)
+    }
+
+    pub fn progress_buffer_size(&self) -> usize {
+        self.progress_buffer_size.unwrap_or(50)
     }
 }
 
@@ -76,6 +81,7 @@ impl GlobalConfig {
             strict_policy_mode: None,
             require_policy_endpoint: None,
             workflow_timeout_minutes: None,
+            progress_buffer_size: None,
         })
     }
 }
@@ -100,6 +106,7 @@ auto_record = true
 # strict_policy_mode = false        # deny unknown policies by default
 # require_policy_endpoint = false   # require vault _policy endpoint (optional by default)
 # workflow_timeout_minutes = 30     # max runtime for bridge-triggered workflows
+# progress_buffer_size = 50         # max lines in progress buffer for Telegram updates
 "#;
 
     fs::write(&path, default)

@@ -383,9 +383,9 @@ fn cmd_run(args: &str, creds: &Arc<BotCredentials>) -> String {
 
     // Create progress socket for real-time updates
     let harness_dir = work_dir.join(".harness");
-    let progress_rx = progress::create_listener(&harness_dir).ok();
-    let (sock_path, progress_receiver) = match progress_rx {
-        Some((p, r)) => (Some(p), Some(r)),
+    let listener_result = progress::create_listener(&harness_dir).ok();
+    let (listener_handle, progress_receiver) = match listener_result {
+        Some((h, r)) => (Some(h), Some(r)),
         None => (None, None),
     };
 
@@ -402,8 +402,8 @@ fn cmd_run(args: &str, creds: &Arc<BotCredentials>) -> String {
         .stderr(std::process::Stdio::piped());
 
     // Pass progress socket path to runner via env var
-    if let Some(ref sp) = sock_path {
-        cmd.env(progress::PROGRESS_SOCK_ENV, sp);
+    if let Some(ref h) = listener_handle {
+        cmd.env(progress::PROGRESS_SOCK_ENV, h.sock_path());
     }
 
     let mut child = match cmd.spawn() {
@@ -417,17 +417,23 @@ fn cmd_run(args: &str, creds: &Arc<BotCredentials>) -> String {
     let work_dir_display = work_dir.display().to_string();
     let timeout_secs = resolve_timeout_secs(&workflow);
 
+    // Load buffer size from config
+    let gc = GlobalConfig::load();
+    let buf_size = gc.bridge().progress_buffer_size();
+
     if wait_mode {
-        // --wait: block this thread, send progress updates, then final result
         let ack = format!(
             "Workflow '{wf_name}' started (PID {pid})\nWaiting for completion (timeout: {}m)...",
             timeout_secs / 60
         );
         let _ = send_message(&creds_clone, &ack);
 
-        return wait_for_workflow(
-            &mut child, &wf_name, &creds_clone, &work_dir, timeout_secs, progress_receiver,
+        let result = wait_for_workflow(
+            &mut child, &wf_name, &creds_clone, &work_dir, timeout_secs, progress_receiver, buf_size,
         );
+        // Drop handle to shut down listener cleanly
+        drop(listener_handle);
+        return result;
     }
 
     // Default: fire-and-forget with completion callback thread
@@ -436,6 +442,8 @@ fn cmd_run(args: &str, creds: &Arc<BotCredentials>) -> String {
         workflow_completion_callback(
             child, &wf_name, &callback_creds, &work_dir_display, timeout_secs, progress_receiver,
         );
+        // Drop handle to shut down listener when workflow finishes
+        drop(listener_handle);
     });
 
     format!(
@@ -478,12 +486,13 @@ fn wait_for_workflow(
     work_dir: &std::path::Path,
     timeout_secs: u64,
     progress_rx: Option<std::sync::mpsc::Receiver<ProgressMsg>>,
+    buf_size: usize,
 ) -> String {
     let start = std::time::Instant::now();
     let harness_dir = work_dir.join(".harness");
 
     // Buffered lines and event-trigger flag (shared with reader thread)
-    let state = Arc::new(Mutex::new(ProgressBatchState::new()));
+    let state = Arc::new(Mutex::new(ProgressBatchState::new(buf_size)));
 
     // Spawn reader thread that buffers messages and flags significant events
     let state_clone = Arc::clone(&state);
@@ -491,10 +500,11 @@ fn wait_for_workflow(
         thread::spawn(move || {
             while let Ok(msg) = rx.recv() {
                 if let Ok(mut s) = state_clone.lock() {
-                    if msg.is_significant() {
+                    let significant = msg.is_significant();
+                    s.push(msg.display_line(), significant);
+                    if significant {
                         s.significant_pending = true;
                     }
-                    s.push(msg.display_line());
                 }
             }
         });
@@ -526,7 +536,7 @@ fn wait_for_workflow(
         // Decide whether to send an update
         let should_send = if let Ok(s) = state.lock() {
             let rate_ok = last_send.elapsed().as_secs() >= MIN_SEND_INTERVAL_SECS;
-            let has_data = !s.lines.is_empty();
+            let has_data = !s.entries.is_empty();
             // Send immediately on significant events (if rate allows) or every 30s as fallback
             (s.significant_pending && rate_ok)
                 || (has_data && last_send.elapsed().as_secs() >= 30)
@@ -545,32 +555,42 @@ fn wait_for_workflow(
 }
 
 /// Batched progress state shared between reader thread and send loop.
+/// Prioritizes EVENT/DONE lines over STDOUT lines: when the buffer is full,
+/// only STDOUT lines are evicted, keeping all lifecycle events visible.
 struct ProgressBatchState {
-    lines: Vec<String>,
+    /// (line_text, is_significant)
+    entries: Vec<(String, bool)>,
+    max_size: usize,
     significant_pending: bool,
 }
 
 impl ProgressBatchState {
-    fn new() -> Self {
+    fn new(max_size: usize) -> Self {
         Self {
-            lines: Vec::new(),
+            entries: Vec::new(),
+            max_size,
             significant_pending: false,
         }
     }
 
-    fn push(&mut self, line: String) {
-        self.lines.push(line);
-        // Keep last 20 lines
-        if self.lines.len() > 20 {
-            let drain = self.lines.len() - 20;
-            self.lines.drain(..drain);
+    fn push(&mut self, line: String, significant: bool) {
+        self.entries.push((line, significant));
+
+        // Evict oldest non-significant (STDOUT) lines first
+        while self.entries.len() > self.max_size {
+            if let Some(pos) = self.entries.iter().position(|(_, sig)| !sig) {
+                self.entries.remove(pos);
+            } else {
+                // All significant — drop the oldest
+                self.entries.remove(0);
+            }
         }
     }
 
     /// Take a snapshot of recent lines and clear the significant flag.
     fn take_snapshot(&mut self) -> Vec<String> {
         self.significant_pending = false;
-        self.lines.clone()
+        self.entries.iter().map(|(l, _)| l.clone()).collect()
     }
 }
 
@@ -1378,6 +1398,42 @@ mod tests {
         assert_eq!(truncate_line("hello", 10), "hello");
         assert_eq!(truncate_line("  hello  ", 10), "hello");
         assert_eq!(truncate_line("hello world this is long", 10), "hello worl...");
+    }
+
+    #[test]
+    fn test_batch_state_priority_buffer() {
+        let mut state = ProgressBatchState::new(5);
+
+        // Fill with 3 significant + 4 stdout (exceeds max 5)
+        state.push("Step 1 started".into(), true);
+        state.push("[builder] line 1".into(), false);
+        state.push("[builder] line 2".into(), false);
+        state.push("Step 1 done".into(), true);
+        state.push("[builder] line 3".into(), false);
+        state.push("[builder] line 4".into(), false);
+        state.push("Step 2 started".into(), true);
+
+        let snapshot = state.take_snapshot();
+        // All 3 significant lines must be present
+        assert!(snapshot.iter().any(|l| l.contains("Step 1 started")));
+        assert!(snapshot.iter().any(|l| l.contains("Step 1 done")));
+        assert!(snapshot.iter().any(|l| l.contains("Step 2 started")));
+        // Total should be max_size
+        assert_eq!(snapshot.len(), 5);
+    }
+
+    #[test]
+    fn test_batch_state_all_significant() {
+        let mut state = ProgressBatchState::new(3);
+        state.push("event 1".into(), true);
+        state.push("event 2".into(), true);
+        state.push("event 3".into(), true);
+        state.push("event 4".into(), true);
+
+        let snapshot = state.take_snapshot();
+        assert_eq!(snapshot.len(), 3);
+        // Oldest significant dropped when all are significant
+        assert!(snapshot.contains(&"event 4".to_string()));
     }
 
     #[test]
