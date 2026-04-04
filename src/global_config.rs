@@ -34,6 +34,9 @@ impl SharedContextConfig {
 pub struct BridgeConfig {
     /// When true, unknown/unimplemented policies deny by default (default: false)
     pub strict_policy_mode: Option<bool>,
+    /// When true, require vault to implement the _policy endpoint (default: false).
+    /// When false, a missing _policy endpoint is silently ignored.
+    pub require_policy_endpoint: Option<bool>,
     /// Default workflow timeout in minutes for bridge-triggered runs (default: 30)
     pub workflow_timeout_minutes: Option<u64>,
 }
@@ -41,6 +44,10 @@ pub struct BridgeConfig {
 impl BridgeConfig {
     pub fn strict_policy_mode(&self) -> bool {
         self.strict_policy_mode.unwrap_or(false)
+    }
+
+    pub fn require_policy_endpoint(&self) -> bool {
+        self.require_policy_endpoint.unwrap_or(false)
     }
 
     pub fn workflow_timeout_minutes(&self) -> u64 {
@@ -67,6 +74,7 @@ impl GlobalConfig {
     pub fn bridge(&self) -> BridgeConfig {
         self.bridge.clone().unwrap_or(BridgeConfig {
             strict_policy_mode: None,
+            require_policy_endpoint: None,
             workflow_timeout_minutes: None,
         })
     }
@@ -89,8 +97,9 @@ url = "http://127.0.0.1:3100/mcp"
 auto_record = true
 
 # [bridge]
-# strict_policy_mode = false      # deny unknown policies by default
-# workflow_timeout_minutes = 30    # max runtime for bridge-triggered workflows
+# strict_policy_mode = false        # deny unknown policies by default
+# require_policy_endpoint = false   # require vault _policy endpoint (optional by default)
+# workflow_timeout_minutes = 30     # max runtime for bridge-triggered workflows
 "#;
 
     fs::write(&path, default)

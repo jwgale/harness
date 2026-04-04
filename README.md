@@ -4,16 +4,22 @@ A CLI tool that orchestrates **planner -> builder -> evaluator** loops using sub
 
 Inspired by [Anthropic's harness architecture](https://www.anthropic.com/engineering/harness-design-long-running-apps) for long-running application development with Opus 4.6.
 
-## v0.10.2 Release Notes
+## v0.10.3 Release Notes
 
-Harness v0.10.2 polishes the Telegram bridge for production use.
+Harness v0.10.3 adds real-time progress and policy robustness to the Telegram bridge.
 
-**New in v0.10.2:**
+**New in v0.10.3:**
+- **Real-time Progress Protocol** — multi-agent runner writes timestamped progress to `.harness/progress.log` as agents execute; bridge polls this for live updates
+- **Live Progress in Telegram** — `/run --wait` now shows real-time agent step starts, completions, verdicts, loop iterations, and parallel batch status
+- **Policy Endpoint Optional** — new `require_policy_endpoint = false` (default) makes `_policy` vault endpoint optional with clear docs; set to `true` only if your vault supports it
+- **Improved Error Messages** — policy denial messages now include hints when vault is misconfigured
+- **15 Unit Tests + 31 Integration Tests** — including progress.log verification
+
+**v0.10.2:**
 - **Configurable Workflow Timeout** — set `workflow_timeout_minutes` globally in `[bridge]` config or per-workflow in TOML (default: 30m)
 - **Strict Policy Mode** — `strict_policy_mode = true` in `[bridge]` config denies commands when vault is unreachable or policies are missing
 - **Rich Progress Updates** — `/run --wait` now reads per-agent status, feedback rounds, and multi-agent output for detailed progress messages
 - **Agent Completion Summary** — workflow results include per-agent output summaries
-- **15 Unit Tests + 30 Integration Tests** — including rich progress, agent summary, truncation
 
 **v0.10.1:**
 - **Workflow Completion Callback** — `/run <workflow>` sends results back to Telegram when the workflow finishes (verdict, timing, evaluation summary)
@@ -615,9 +621,13 @@ harness bridge telegram start
   → "Workflow 'standard' started (PID 12345)
      Waiting for completion (timeout: 30m)..."
   → "Workflow 'standard' running... (60s)
-     Status: Build phase 2 in progress
-       my-builder: Implementing authentication module...
-     Feedback rounds completed: 1"
+
+     [12:01:00] Step 1/3: agent 'my-planner' started
+     [12:01:15] Planner 'my-planner' done -- spec.md written
+     [12:01:16] Step 2/3: agent 'my-builder' started
+
+     Agents:
+       my-builder: Building authentication module..."
   → "Workflow 'standard' completed (142s)
      Verdict: PASS
 
@@ -629,7 +639,7 @@ harness bridge telegram start
        my-builder: output (4096 bytes)"
 ```
 
-The default mode (no `--wait`) returns immediately and sends results asynchronously when the workflow finishes. The `--wait` mode sends progress updates every 60 seconds and blocks until completion (30-minute timeout).
+The default mode (no `--wait`) returns immediately and sends results asynchronously when the workflow finishes. The `--wait` mode sends progress updates every 60 seconds with live output from `.harness/progress.log`, and blocks until completion.
 
 ### Permission System
 
@@ -642,16 +652,23 @@ All bridge commands check SanctumAI vault policies before executing:
 | `harness:bridge:telegram:agent` | `/agent` commands |
 | `harness:bridge:telegram:vault` | `/vault` commands |
 
-By default, if the vault is unreachable or policies aren't configured, commands are **allowed** (having stored credentials is considered sufficient authorization). For shared deployments, enable **strict mode** to deny by default:
+The `_policy` vault endpoint is **optional** -- most SanctumAI vaults don't implement it yet. By default, if the vault is unreachable or policies aren't configured, commands are **allowed**.
 
 ```toml
 # ~/.config/harness/config.toml
 [bridge]
-strict_policy_mode = true          # deny when vault unreachable or policy missing
-workflow_timeout_minutes = 45      # max runtime for bridge-triggered workflows (default: 30)
+strict_policy_mode = true           # deny when vault unreachable or policy missing
+require_policy_endpoint = false     # true = require vault to implement _policy (default: false)
+workflow_timeout_minutes = 45       # max runtime for bridge-triggered workflows (default: 30)
 ```
 
-Per-workflow timeouts can also be set in workflow TOML files:
+| Flag | Default | Effect |
+|------|---------|--------|
+| `strict_policy_mode` | `false` | When `true`, missing policy responses deny by default |
+| `require_policy_endpoint` | `false` | When `true`, vault must implement `_policy` or commands are denied |
+| `workflow_timeout_minutes` | `30` | Max runtime for `/run` triggered workflows |
+
+Per-workflow timeouts override the global setting:
 
 ```toml
 # ~/.config/harness/workflows/long-build.toml
@@ -659,7 +676,7 @@ name = "long-build"
 timeout_minutes = 60    # overrides global bridge config for this workflow
 ```
 
-When a policy denies a command, the bot replies with a clear denial message including the policy name.
+When a policy denies a command, the bot replies with a clear denial message including the policy name and a hint if misconfigured.
 
 ### Management
 
@@ -1016,7 +1033,14 @@ Harness is evolving from a thin orchestrator into a full local-first agent platf
 - Agent completion summary in workflow result messages
 - 15 unit tests + 30 integration tests
 
-**Phase 21: Agent Specialization + Cross-Project Learning**
+**Phase 21: Real-time Progress Protocol + Policy Robustness (done)**
+- Progress log protocol: `.harness/progress.log` written by runner with timestamped agent events
+- Live progress in Telegram: step starts, completions, verdicts, loop iterations, parallel batches
+- `require_policy_endpoint` config flag: `_policy` vault endpoint is optional by default
+- Improved policy error messages with hints for misconfiguration
+- 15 unit tests + 31 integration tests
+
+**Phase 22: Agent Specialization + Cross-Project Learning**
 - Agent specialization (frontend, backend, testing)
 - Cross-project learning via Shared Context Layer
 

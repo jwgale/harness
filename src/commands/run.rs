@@ -177,11 +177,14 @@ pub fn run_multi_agent(
         scl_lifecycle::record_agent_run_start(&config.project_name, &name_refs);
 
         println!("Running workflow '{}' ({} groups from {} steps)", wf.name, groups.len(), wf.steps.len());
+        artifacts::clear_progress_log();
+        artifacts::append_progress(&format!("Workflow '{}' started ({} steps)", wf.name, wf.steps.len()));
 
         let result = run_step_groups(&groups, backend_override, &config, &pm);
 
         let status = if result.is_ok() { "completed" } else { "FAIL" };
         scl_lifecycle::record_agent_run_end(&config.project_name, &name_refs, status);
+        artifacts::append_progress(&format!("Workflow '{}' {status}", wf.name));
         println!("\n=== Workflow '{}' {status} ===", wf.name);
         return result;
     }
@@ -267,7 +270,9 @@ pub fn run_step_groups_with_tui(
                     ));
                 }
                 println!("\n--- Group {}/{}: agent '{}' ---", gi + 1, groups.len(), step.agent);
+                artifacts::append_progress(&format!("Step {}/{}: agent '{}' started", gi + 1, groups.len(), step.agent));
                 run_single_step_streaming(step, backend_override, config, pm, tui_tx)?;
+                artifacts::append_progress(&format!("Step {}/{}: agent '{}' done", gi + 1, groups.len(), step.agent));
             }
             workflows::StepGroup::Parallel(steps) => {
                 let names: Vec<&str> = steps.iter().map(|s| s.agent.as_str()).collect();
@@ -278,9 +283,11 @@ pub fn run_step_groups_with_tui(
                     ));
                 }
                 println!("\n--- Group {}/{}: parallel [{}] ---", gi + 1, groups.len(), names.join(", "));
+                artifacts::append_progress(&format!("Parallel batch: [{}]", names.join(", ")));
                 scl_lifecycle::record_parallel_start(&config.project_name, &names);
                 run_parallel_steps(steps, backend_override, config, pm, tui_tx)?;
                 scl_lifecycle::record_parallel_end(&config.project_name, &names);
+                artifacts::append_progress(&format!("Parallel batch done: [{}]", names.join(", ")));
             }
             workflows::StepGroup::Loop { body, evaluator, max_rounds } => {
                 let body_names: Vec<&str> = body.iter().map(|s| s.agent.as_str()).collect();
@@ -332,6 +339,7 @@ fn run_single_step_streaming(
             artifacts::write_artifact("spec.md", &output)?;
             pm.fire(HookPoint::AfterPlan);
             scl_lifecycle::record_agent_step(&config.project_name, &agent.name, "planner", "completed");
+            artifacts::append_progress(&format!("Planner '{}' done -- spec.md written", agent.name));
             println!("  Plan written to .harness/spec.md");
             Ok(None)
         }
@@ -340,6 +348,7 @@ fn run_single_step_streaming(
             artifacts::write_artifact("status.md", &output)?;
             pm.fire(HookPoint::AfterBuild);
             scl_lifecycle::record_agent_step(&config.project_name, &agent.name, "builder", "completed");
+            artifacts::append_progress(&format!("Builder '{}' done", agent.name));
             println!("  Build complete.");
             Ok(None)
         }
@@ -356,6 +365,7 @@ fn run_single_step_streaming(
                 &format!("{verdict:?}"),
             );
             notifications::fire_eval_event(&verdict, &config.project_name, fb_round);
+            artifacts::append_progress(&format!("Evaluator '{}' verdict: {verdict:?}", agent.name));
             println!("  Verdict: {verdict:?}");
 
             match &verdict {
@@ -373,6 +383,7 @@ fn run_single_step_streaming(
                 .unwrap_or(&default_artifact);
             artifacts::write_artifact(artifact_name, &output)?;
             scl_lifecycle::record_agent_step(&config.project_name, &agent.name, "custom", "completed");
+            artifacts::append_progress(&format!("Agent '{}' done -- {artifact_name}", agent.name));
             println!("  Output written to .harness/{artifact_name}");
             Ok(None)
         }
@@ -569,6 +580,7 @@ fn run_iterative_loop(
             ));
         }
         println!("\n  === Iteration {round}/{max_rounds} ===");
+        artifacts::append_progress(&format!("Loop iteration {round}/{max_rounds}"));
 
         for step in body {
             run_single_step_streaming(step, backend_override, config, pm, tui_tx)?;
@@ -580,10 +592,12 @@ fn run_iterative_loop(
 
         match verdict {
             Some(Verdict::Pass) => {
+                artifacts::append_progress(&format!("Loop completed: PASS (round {round})"));
                 println!("  Loop completed: PASS on round {round}");
                 return Ok(());
             }
             Some(Verdict::Fail) => {
+                artifacts::append_progress(&format!("Loop failed: FAIL (round {round})"));
                 return Err(format!("Loop failed: FAIL on round {round}"));
             }
             Some(Verdict::Revise) => {

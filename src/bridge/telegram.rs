@@ -239,9 +239,14 @@ fn resolve_timeout_secs(workflow_name: &str) -> u64 {
 /// Check if the vault grants the given policy (e.g. "harness:bridge:telegram:run").
 /// Returns Ok(()) if allowed, Err(message) if denied.
 ///
-/// Behavior depends on `strict_policy_mode` in `[bridge]` config:
-/// - **false (default):** vault errors or missing policies are treated as allow
-/// - **true:** vault errors or missing policies are treated as deny
+/// Three config flags control behavior:
+/// - `strict_policy_mode`: when true, missing policy responses deny by default
+/// - `require_policy_endpoint`: when true, vault must implement `_policy`;
+///   when false (default), a missing endpoint is silently allowed
+///
+/// The `_policy` vault endpoint is optional. Most SanctumAI vaults don't
+/// implement it yet. Set `require_policy_endpoint = true` only if your
+/// vault supports it.
 fn check_policy(policy: &str) -> Result<(), String> {
     let vc = vault::load_config();
     if !vc.enabled {
@@ -249,7 +254,9 @@ fn check_policy(policy: &str) -> Result<(), String> {
     }
 
     let gc = GlobalConfig::load();
-    let strict = gc.bridge().strict_policy_mode();
+    let bridge_cfg = gc.bridge();
+    let strict = bridge_cfg.strict_policy_mode();
+    let require_endpoint = bridge_cfg.require_policy_endpoint();
 
     let params = serde_json::json!({ "policy": policy });
     match vault::use_credential(&vc, "_policy", "check", params) {
@@ -268,12 +275,21 @@ fn check_policy(policy: &str) -> Result<(), String> {
                 Err(format!("Permission denied: {reason}\nPolicy: `{policy}`"))
             }
         }
-        Err(_) if strict => {
+        Err(e) if require_endpoint => {
+            // User explicitly requires _policy — treat errors as denials
             Err(format!(
-                "Permission denied: vault unreachable (strict mode)\nPolicy: `{policy}`"
+                "Permission denied: policy check failed ({e})\n\
+                 Policy: `{policy}`\n\
+                 Hint: set `require_policy_endpoint = false` if your vault doesn't support policies"
             ))
         }
-        // Non-strict: vault unreachable or _policy not implemented → allow
+        Err(_) if strict => {
+            // Strict mode but _policy is optional — deny but note it's optional
+            Err(format!(
+                "Permission denied: vault policy check unavailable (strict mode)\nPolicy: `{policy}`"
+            ))
+        }
+        // Non-strict, endpoint not required: silently allow
         Err(_) => Ok(()),
     }
 }
@@ -568,8 +584,8 @@ fn format_completion_result(
 
 /// Collect rich progress info from the harness directory.
 ///
-/// Reads status.md, per-agent status files, and feedback rounds to build
-/// a detailed progress message like "Builder (round 2/5) -- Feature X".
+/// Reads the progress.log (written by the runner in real time), per-agent
+/// status files, and feedback rounds for a detailed progress message.
 fn collect_rich_progress(
     workflow: &str,
     start: &std::time::Instant,
@@ -578,12 +594,23 @@ fn collect_rich_progress(
     let elapsed = start.elapsed().as_secs();
     let mut lines = vec![format!("Workflow '{workflow}' running... ({elapsed}s)")];
 
-    // Check main status.md for latest line
-    let status_path = harness_dir.join("status.md");
-    if let Ok(content) = fs::read_to_string(&status_path)
-        && let Some(last) = content.lines().rev().find(|l| !l.trim().is_empty())
-    {
-        lines.push(format!("Status: {}", truncate_line(last, 100)));
+    // Read recent lines from progress.log (real-time agent output)
+    let progress_path = harness_dir.join("progress.log");
+    if let Ok(content) = fs::read_to_string(&progress_path) {
+        let recent: Vec<&str> = content
+            .lines()
+            .rev()
+            .take(5)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        if !recent.is_empty() {
+            lines.push(String::new()); // blank line separator
+            for line in &recent {
+                lines.push(truncate_line(line, 120));
+            }
+        }
     }
 
     // Check per-agent status files in .harness/agents/*/status.md
@@ -591,6 +618,7 @@ fn collect_rich_progress(
     if agents_dir.exists()
         && let Ok(entries) = fs::read_dir(&agents_dir)
     {
+        let mut agent_lines = Vec::new();
         for entry in entries.flatten() {
             let agent_dir = entry.path();
             if !agent_dir.is_dir() {
@@ -604,29 +632,16 @@ fn collect_rich_progress(
             if let Ok(content) = fs::read_to_string(&agent_status)
                 && let Some(last) = content.lines().rev().find(|l| !l.trim().is_empty())
             {
-                lines.push(format!(
+                agent_lines.push(format!(
                     "  `{agent_name}`: {}",
                     truncate_line(last, 80)
                 ));
             }
         }
-    }
-
-    // Check feedback rounds for current round info
-    let feedback_dir = harness_dir.join("feedback");
-    if feedback_dir.exists()
-        && let Ok(entries) = fs::read_dir(&feedback_dir)
-    {
-        let round_count = entries
-            .flatten()
-            .filter(|e| {
-                e.path()
-                    .file_name()
-                    .is_some_and(|f| f.to_string_lossy().starts_with("round-"))
-            })
-            .count();
-        if round_count > 0 {
-            lines.push(format!("Feedback rounds completed: {round_count}"));
+        if !agent_lines.is_empty() {
+            lines.push(String::new());
+            lines.push("Agents:".to_string());
+            lines.extend(agent_lines);
         }
     }
 
@@ -1246,13 +1261,17 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_rich_progress_with_status() {
+    fn test_collect_rich_progress_with_progress_log() {
         let tmp = std::env::temp_dir().join(format!("harness-test-progress2-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
-        std::fs::write(tmp.join("status.md"), "# Status\nBuild phase 2 in progress\n").unwrap();
+        std::fs::write(
+            tmp.join("progress.log"),
+            "[12:00:01] Step 1/3: agent 'planner' started\n[12:00:30] Planner 'my-planner' done\n[12:01:00] Step 2/3: agent 'builder' started\n",
+        ).unwrap();
         let start = std::time::Instant::now();
         let progress = collect_rich_progress("test-wf", &start, &tmp);
-        assert!(progress.contains("Build phase 2 in progress"));
+        assert!(progress.contains("builder"), "should contain builder line: {progress}");
+        assert!(progress.contains("planner"), "should contain planner line: {progress}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

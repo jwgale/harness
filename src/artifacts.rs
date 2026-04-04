@@ -123,6 +123,28 @@ pub fn merge_agent_artifacts(agent_names: &[&str], artifact_name: &str) -> Resul
     Ok(())
 }
 
+/// Clear the progress log (called at workflow start).
+pub fn clear_progress_log() {
+    let path = harness_dir().join("progress.log");
+    let _ = fs::write(&path, "");
+}
+
+/// Append a timestamped progress line to .harness/progress.log.
+/// Used by the multi-agent runner to provide live status to external watchers.
+pub fn append_progress(line: &str) {
+    let path = harness_dir().join("progress.log");
+    let timestamp = chrono::Local::now().format("%H:%M:%S");
+    let entry = format!("[{timestamp}] {line}\n");
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| {
+            use std::io::Write;
+            f.write_all(entry.as_bytes())
+        });
+}
+
 pub fn list_project_files() -> String {
     let mut files = Vec::new();
     collect_files(Path::new("."), &mut files);

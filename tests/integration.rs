@@ -734,3 +734,49 @@ fn test_bridge_telegram_help() {
     assert!(stdout.contains("start") && stdout.contains("stop") && stdout.contains("status"),
         "bridge telegram help should list start/stop/status: {stdout}");
 }
+
+#[test]
+fn test_workflow_progress_log() {
+    // Verify that running a workflow with --no-tui writes progress.log
+    let tmp = tempdir("progresslog");
+    run_harness_in(&tmp, &["init", "Progress log test"]);
+    fs::write(tmp.join(".harness/spec.md"), "# Test Spec").unwrap();
+
+    let agents_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp/.config"))
+        .join("harness/agents");
+    let workflows_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp/.config"))
+        .join("harness/workflows");
+    fs::create_dir_all(&agents_dir).unwrap();
+    fs::create_dir_all(&workflows_dir).unwrap();
+
+    fs::write(agents_dir.join("prog-planner.toml"), "name = \"prog-planner\"\nrole = \"planner\"\nbackend = \"mock\"\n").unwrap();
+    fs::write(agents_dir.join("prog-builder.toml"), "name = \"prog-builder\"\nrole = \"builder\"\nbackend = \"mock\"\n").unwrap();
+    fs::write(workflows_dir.join("prog-flow.toml"), r#"
+name = "prog-flow"
+[[steps]]
+agent = "prog-planner"
+[[steps]]
+agent = "prog-builder"
+"#).unwrap();
+
+    let (_stdout, _stderr, ok) = run_harness_in(&tmp, &[
+        "run", "--workflow", "prog-flow", "--no-tui",
+    ]);
+    assert!(ok, "workflow should succeed");
+
+    // Check that progress.log was written
+    let progress_path = tmp.join(".harness/progress.log");
+    assert!(progress_path.exists(), "progress.log should exist");
+    let content = fs::read_to_string(&progress_path).unwrap();
+    assert!(content.contains("prog-flow"), "progress.log should mention workflow name: {content}");
+    assert!(content.contains("prog-planner"), "progress.log should mention planner: {content}");
+    assert!(content.contains("prog-builder"), "progress.log should mention builder: {content}");
+    assert!(content.contains("completed"), "progress.log should contain completion: {content}");
+
+    fs::remove_file(agents_dir.join("prog-planner.toml")).ok();
+    fs::remove_file(agents_dir.join("prog-builder.toml")).ok();
+    fs::remove_file(workflows_dir.join("prog-flow.toml")).ok();
+    fs::remove_dir_all(&tmp).ok();
+}
