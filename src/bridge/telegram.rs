@@ -12,12 +12,13 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::global_config::GlobalConfig;
 use crate::scl_lifecycle;
 use crate::vault;
+use crate::workflows;
 use crate::xdg;
 
 const POLL_TIMEOUT_SECS: u64 = 30;
-const WORKFLOW_WAIT_TIMEOUT_SECS: u64 = 1800; // 30 minutes max wait
 const WORKFLOW_POLL_INTERVAL_SECS: u64 = 10;
 
 // ---------------------------------------------------------------------------
@@ -215,20 +216,40 @@ fn get_updates(bot_token: &str, offset: i64) -> Result<Vec<Value>, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Configurable timeout
+// ---------------------------------------------------------------------------
+
+/// Resolve workflow timeout in seconds. Priority: workflow TOML > global config > 30 min default.
+fn resolve_timeout_secs(workflow_name: &str) -> u64 {
+    // Check per-workflow timeout
+    if let Ok(wf) = workflows::load(workflow_name)
+        && let Some(mins) = wf.timeout_minutes
+    {
+        return mins * 60;
+    }
+    // Fall back to global bridge config
+    let gc = GlobalConfig::load();
+    gc.bridge().workflow_timeout_minutes() * 60
+}
+
+// ---------------------------------------------------------------------------
 // Vault policy checks
 // ---------------------------------------------------------------------------
 
 /// Check if the vault grants the given policy (e.g. "harness:bridge:telegram:run").
 /// Returns Ok(()) if allowed, Err(message) if denied.
 ///
-/// When the vault is unreachable or policies aren't configured, we fall back to
-/// allow — the vault being enabled and the user having stored credentials is
-/// considered sufficient authorization.
+/// Behavior depends on `strict_policy_mode` in `[bridge]` config:
+/// - **false (default):** vault errors or missing policies are treated as allow
+/// - **true:** vault errors or missing policies are treated as deny
 fn check_policy(policy: &str) -> Result<(), String> {
     let vc = vault::load_config();
     if !vc.enabled {
         return Ok(()); // vault disabled → no policy enforcement
     }
+
+    let gc = GlobalConfig::load();
+    let strict = gc.bridge().strict_policy_mode();
 
     let params = serde_json::json!({ "policy": policy });
     match vault::use_credential(&vc, "_policy", "check", params) {
@@ -236,7 +257,7 @@ fn check_policy(policy: &str) -> Result<(), String> {
             let allowed = result
                 .get("allowed")
                 .and_then(|v| v.as_bool())
-                .unwrap_or(true); // default allow if field missing
+                .unwrap_or(!strict); // strict → deny when field missing
             if allowed {
                 Ok(())
             } else {
@@ -247,7 +268,12 @@ fn check_policy(policy: &str) -> Result<(), String> {
                 Err(format!("Permission denied: {reason}\nPolicy: `{policy}`"))
             }
         }
-        // Vault unreachable or _policy not implemented → allow
+        Err(_) if strict => {
+            Err(format!(
+                "Permission denied: vault unreachable (strict mode)\nPolicy: `{policy}`"
+            ))
+        }
+        // Non-strict: vault unreachable or _policy not implemented → allow
         Err(_) => Ok(()),
     }
 }
@@ -359,27 +385,31 @@ fn cmd_run(args: &str, creds: &Arc<BotCredentials>) -> String {
     let wf_name = workflow.to_string();
     let creds_clone = Arc::clone(creds);
     let work_dir_display = work_dir.display().to_string();
+    let timeout_secs = resolve_timeout_secs(&workflow);
 
     if wait_mode {
         // --wait: block this thread, send progress updates, then final result
         let ack = format!(
             "Workflow '{wf_name}' started (PID {pid})\nWaiting for completion (timeout: {}m)...",
-            WORKFLOW_WAIT_TIMEOUT_SECS / 60
+            timeout_secs / 60
         );
         let _ = send_message(&creds_clone, &ack);
 
         // Poll for completion with progress updates
-        let result = wait_for_workflow(&mut child, &wf_name, &creds_clone, &work_dir);
-        return result;
+        return wait_for_workflow(&mut child, &wf_name, &creds_clone, &work_dir, timeout_secs);
     }
 
     // Default: fire-and-forget with completion callback thread
     let callback_creds = Arc::clone(creds);
     thread::spawn(move || {
-        workflow_completion_callback(child, &wf_name, &callback_creds, &work_dir_display);
+        workflow_completion_callback(child, &wf_name, &callback_creds, &work_dir_display, timeout_secs);
     });
 
-    format!("Workflow '{workflow}' started (PID {pid}) in `{}`\nYou'll get a result when it finishes.", work_dir.display())
+    format!(
+        "Workflow '{workflow}' started (PID {pid}) in `{}`\nYou'll get a result when it finishes (timeout: {}m).",
+        work_dir.display(),
+        timeout_secs / 60,
+    )
 }
 
 /// Parse /run args into (workflow_name, wait_mode).
@@ -399,99 +429,43 @@ fn parse_run_args(args: &str) -> (String, bool) {
     (workflow, wait)
 }
 
-/// Wait for a workflow child process, sending periodic progress updates.
+/// Wait for a workflow child process, sending periodic rich progress updates.
 fn wait_for_workflow(
     child: &mut std::process::Child,
     workflow: &str,
     creds: &BotCredentials,
     work_dir: &std::path::Path,
+    timeout_secs: u64,
 ) -> String {
     let start = std::time::Instant::now();
     let mut last_update = std::time::Instant::now();
-    let eval_path = work_dir.join(".harness/evaluation.md");
-    let status_path = work_dir.join(".harness/status.md");
-    let mut last_status_len: u64 = 0;
+    let harness_dir = work_dir.join(".harness");
 
     loop {
         // Check if process finished
         match child.try_wait() {
             Ok(Some(status)) => {
-                let elapsed = start.elapsed().as_secs();
-                let outcome = if status.success() { "completed" } else { "failed" };
-                let mut result = format!(
-                    "Workflow '{workflow}' {outcome} ({elapsed}s)"
-                );
-
-                // Read evaluation.md for verdict
-                if let Ok(eval) = fs::read_to_string(&eval_path) {
-                    let verdict = extract_verdict(&eval);
-                    if !verdict.is_empty() {
-                        result.push_str(&format!("\nVerdict: {verdict}"));
-                    }
-                    // Include first few lines of evaluation
-                    let summary = eval.lines().take(10).collect::<Vec<_>>().join("\n");
-                    if !summary.is_empty() {
-                        result.push_str(&format!("\n\n{summary}"));
-                    }
-                }
-
-                // Capture stderr for errors
-                if !status.success()
-                    && let Some(stderr) = child.stderr.take()
-                {
-                    use std::io::Read;
-                    let mut buf = String::new();
-                    let mut reader = std::io::BufReader::new(stderr);
-                    let _ = reader.read_to_string(&mut buf);
-                    if !buf.is_empty() {
-                        let snippet = if buf.len() > 500 {
-                            &buf[buf.len() - 500..]
-                        } else {
-                            &buf
-                        };
-                        result.push_str(&format!("\n\nError output:\n```\n{snippet}\n```"));
-                    }
-                }
-
-                return result;
+                return format_completion_result(workflow, &start, status.success(), child, &harness_dir);
             }
-            Ok(None) => {
-                // Still running
-            }
+            Ok(None) => {}
             Err(e) => {
                 return format!("Error waiting for workflow: {e}");
             }
         }
 
         // Timeout check
-        if start.elapsed().as_secs() > WORKFLOW_WAIT_TIMEOUT_SECS {
+        if start.elapsed().as_secs() > timeout_secs {
             let _ = child.kill();
             return format!(
                 "Workflow '{workflow}' timed out after {}m. Process killed.",
-                WORKFLOW_WAIT_TIMEOUT_SECS / 60
+                timeout_secs / 60
             );
         }
 
-        // Send progress update every 60 seconds
+        // Send rich progress update every 60 seconds
         if last_update.elapsed().as_secs() >= 60 {
             last_update = std::time::Instant::now();
-            let elapsed = start.elapsed().as_secs();
-            let mut progress = format!("Still running... ({elapsed}s)");
-
-            // Check if status.md has been updated
-            if let Ok(meta) = fs::metadata(&status_path) {
-                let current_len = meta.len();
-                if current_len != last_status_len {
-                    last_status_len = current_len;
-                    if let Ok(content) = fs::read_to_string(&status_path) {
-                        let last_line = content.lines().last().unwrap_or("");
-                        if !last_line.is_empty() {
-                            progress.push_str(&format!("\nLatest: {last_line}"));
-                        }
-                    }
-                }
-            }
-
+            let progress = collect_rich_progress(workflow, &start, &harness_dir);
             let _ = send_message(creds, &progress);
         }
 
@@ -505,64 +479,25 @@ fn workflow_completion_callback(
     workflow: &str,
     creds: &BotCredentials,
     work_dir: &str,
+    timeout_secs: u64,
 ) {
     let start = std::time::Instant::now();
+    let harness_dir = std::path::PathBuf::from(work_dir).join(".harness");
 
-    // Wait with timeout
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let elapsed = start.elapsed().as_secs();
-                let outcome = if status.success() {
-                    "completed"
-                } else {
-                    "failed"
-                };
-                let mut result = format!("Workflow '{workflow}' {outcome} ({elapsed}s)");
-
-                // Read evaluation.md for verdict summary
-                let eval_path =
-                    std::path::PathBuf::from(work_dir).join(".harness/evaluation.md");
-                if let Ok(eval) = fs::read_to_string(&eval_path) {
-                    let verdict = extract_verdict(&eval);
-                    if !verdict.is_empty() {
-                        result.push_str(&format!("\nVerdict: {verdict}"));
-                    }
-                    let summary = eval.lines().take(10).collect::<Vec<_>>().join("\n");
-                    if !summary.is_empty() {
-                        result.push_str(&format!("\n\n{summary}"));
-                    }
-                }
-
-                // Capture stderr on failure
-                if !status.success()
-                    && let Some(stderr) = child.stderr.take()
-                {
-                    use std::io::Read;
-                    let mut buf = String::new();
-                    let mut reader = std::io::BufReader::new(stderr);
-                    let _ = reader.read_to_string(&mut buf);
-                    if !buf.is_empty() {
-                        let snippet = if buf.len() > 500 {
-                            &buf[buf.len() - 500..]
-                        } else {
-                            &buf
-                        };
-                        result.push_str(&format!("\n\nError output:\n```\n{snippet}\n```"));
-                    }
-                }
-
+                let result = format_completion_result(workflow, &start, status.success(), &mut child, &harness_dir);
                 scl_lifecycle::record_bridge_response("telegram", "/run", &result);
                 let _ = send_message(creds, &result);
                 return;
             }
             Ok(None) => {
-                // Still running — check timeout
-                if start.elapsed().as_secs() > WORKFLOW_WAIT_TIMEOUT_SECS {
+                if start.elapsed().as_secs() > timeout_secs {
                     let _ = child.kill();
                     let msg = format!(
                         "Workflow '{workflow}' timed out after {}m. Process killed.",
-                        WORKFLOW_WAIT_TIMEOUT_SECS / 60
+                        timeout_secs / 60
                     );
                     let _ = send_message(creds, &msg);
                     return;
@@ -576,6 +511,177 @@ fn workflow_completion_callback(
         }
 
         thread::sleep(Duration::from_secs(WORKFLOW_POLL_INTERVAL_SECS));
+    }
+}
+
+/// Format completion result with verdict, evaluation summary, and stderr.
+fn format_completion_result(
+    workflow: &str,
+    start: &std::time::Instant,
+    success: bool,
+    child: &mut std::process::Child,
+    harness_dir: &std::path::Path,
+) -> String {
+    let elapsed = start.elapsed().as_secs();
+    let outcome = if success { "completed" } else { "failed" };
+    let mut result = format!("Workflow '{workflow}' {outcome} ({elapsed}s)");
+
+    // Read evaluation.md for verdict
+    let eval_path = harness_dir.join("evaluation.md");
+    if let Ok(eval) = fs::read_to_string(&eval_path) {
+        let verdict = extract_verdict(&eval);
+        if !verdict.is_empty() {
+            result.push_str(&format!("\nVerdict: {verdict}"));
+        }
+        let summary = eval.lines().take(10).collect::<Vec<_>>().join("\n");
+        if !summary.is_empty() {
+            result.push_str(&format!("\n\n{summary}"));
+        }
+    }
+
+    // Include agent completion summary if multi-agent
+    let agent_summary = collect_agent_summary(harness_dir);
+    if !agent_summary.is_empty() {
+        result.push_str(&format!("\n\n{agent_summary}"));
+    }
+
+    // Capture stderr on failure
+    if !success
+        && let Some(stderr) = child.stderr.take()
+    {
+        use std::io::Read;
+        let mut buf = String::new();
+        let mut reader = std::io::BufReader::new(stderr);
+        let _ = reader.read_to_string(&mut buf);
+        if !buf.is_empty() {
+            let snippet = if buf.len() > 500 {
+                &buf[buf.len() - 500..]
+            } else {
+                &buf
+            };
+            result.push_str(&format!("\n\nError output:\n```\n{snippet}\n```"));
+        }
+    }
+
+    result
+}
+
+/// Collect rich progress info from the harness directory.
+///
+/// Reads status.md, per-agent status files, and feedback rounds to build
+/// a detailed progress message like "Builder (round 2/5) -- Feature X".
+fn collect_rich_progress(
+    workflow: &str,
+    start: &std::time::Instant,
+    harness_dir: &std::path::Path,
+) -> String {
+    let elapsed = start.elapsed().as_secs();
+    let mut lines = vec![format!("Workflow '{workflow}' running... ({elapsed}s)")];
+
+    // Check main status.md for latest line
+    let status_path = harness_dir.join("status.md");
+    if let Ok(content) = fs::read_to_string(&status_path)
+        && let Some(last) = content.lines().rev().find(|l| !l.trim().is_empty())
+    {
+        lines.push(format!("Status: {}", truncate_line(last, 100)));
+    }
+
+    // Check per-agent status files in .harness/agents/*/status.md
+    let agents_dir = harness_dir.join("agents");
+    if agents_dir.exists()
+        && let Ok(entries) = fs::read_dir(&agents_dir)
+    {
+        for entry in entries.flatten() {
+            let agent_dir = entry.path();
+            if !agent_dir.is_dir() {
+                continue;
+            }
+            let agent_name = agent_dir
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let agent_status = agent_dir.join("status.md");
+            if let Ok(content) = fs::read_to_string(&agent_status)
+                && let Some(last) = content.lines().rev().find(|l| !l.trim().is_empty())
+            {
+                lines.push(format!(
+                    "  `{agent_name}`: {}",
+                    truncate_line(last, 80)
+                ));
+            }
+        }
+    }
+
+    // Check feedback rounds for current round info
+    let feedback_dir = harness_dir.join("feedback");
+    if feedback_dir.exists()
+        && let Ok(entries) = fs::read_dir(&feedback_dir)
+    {
+        let round_count = entries
+            .flatten()
+            .filter(|e| {
+                e.path()
+                    .file_name()
+                    .is_some_and(|f| f.to_string_lossy().starts_with("round-"))
+            })
+            .count();
+        if round_count > 0 {
+            lines.push(format!("Feedback rounds completed: {round_count}"));
+        }
+    }
+
+    lines.join("\n")
+}
+
+/// Summarize per-agent status files for the completion message.
+fn collect_agent_summary(harness_dir: &std::path::Path) -> String {
+    let agents_dir = harness_dir.join("agents");
+    if !agents_dir.exists() {
+        return String::new();
+    }
+    let Ok(entries) = fs::read_dir(&agents_dir) else {
+        return String::new();
+    };
+
+    let mut lines = Vec::new();
+    for entry in entries.flatten() {
+        let agent_dir = entry.path();
+        if !agent_dir.is_dir() {
+            continue;
+        }
+        let agent_name = agent_dir
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let agent_status = agent_dir.join("status.md");
+        if agent_status.exists() {
+            let size = fs::metadata(&agent_status)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            if size > 0 {
+                lines.push(format!("  `{agent_name}`: output ({size} bytes)"));
+            }
+        }
+    }
+
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("Agents:\n{}", lines.join("\n"))
+    }
+}
+
+/// Truncate a line to max chars, appending "..." if truncated.
+fn truncate_line(s: &str, max: usize) -> String {
+    let trimmed = s.trim();
+    if trimmed.len() <= max {
+        trimmed.to_string()
+    } else {
+        let mut end = max;
+        while end > 0 && !trimmed.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &trimmed[..end])
     }
 }
 
@@ -1119,5 +1225,55 @@ mod tests {
             policy_for_command("/unknown"),
             "harness:bridge:telegram:other"
         );
+    }
+
+    #[test]
+    fn test_truncate_line() {
+        assert_eq!(truncate_line("hello", 10), "hello");
+        assert_eq!(truncate_line("  hello  ", 10), "hello");
+        assert_eq!(truncate_line("hello world this is long", 10), "hello worl...");
+    }
+
+    #[test]
+    fn test_collect_rich_progress_empty_dir() {
+        let tmp = std::env::temp_dir().join(format!("harness-test-progress-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let start = std::time::Instant::now();
+        let progress = collect_rich_progress("test-wf", &start, &tmp);
+        assert!(progress.contains("test-wf"));
+        assert!(progress.contains("running"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_collect_rich_progress_with_status() {
+        let tmp = std::env::temp_dir().join(format!("harness-test-progress2-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        std::fs::write(tmp.join("status.md"), "# Status\nBuild phase 2 in progress\n").unwrap();
+        let start = std::time::Instant::now();
+        let progress = collect_rich_progress("test-wf", &start, &tmp);
+        assert!(progress.contains("Build phase 2 in progress"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_collect_agent_summary_with_agents() {
+        let tmp = std::env::temp_dir().join(format!("harness-test-agents-{}", std::process::id()));
+        let agent_dir = tmp.join("agents/my-builder");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join("status.md"), "some output here").unwrap();
+        let summary = collect_agent_summary(&tmp);
+        assert!(summary.contains("my-builder"));
+        assert!(summary.contains("output"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_collect_agent_summary_empty() {
+        let tmp = std::env::temp_dir().join(format!("harness-test-noagents-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let summary = collect_agent_summary(&tmp);
+        assert!(summary.is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

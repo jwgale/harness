@@ -4,17 +4,23 @@ A CLI tool that orchestrates **planner -> builder -> evaluator** loops using sub
 
 Inspired by [Anthropic's harness architecture](https://www.anthropic.com/engineering/harness-design-long-running-apps) for long-running application development with Opus 4.6.
 
-## v0.10.1 Release Notes
+## v0.10.2 Release Notes
 
-Harness v0.10.1 closes the feedback loop on the Telegram bridge.
+Harness v0.10.2 polishes the Telegram bridge for production use.
 
-**New in v0.10.1:**
+**New in v0.10.2:**
+- **Configurable Workflow Timeout** — set `workflow_timeout_minutes` globally in `[bridge]` config or per-workflow in TOML (default: 30m)
+- **Strict Policy Mode** — `strict_policy_mode = true` in `[bridge]` config denies commands when vault is unreachable or policies are missing
+- **Rich Progress Updates** — `/run --wait` now reads per-agent status, feedback rounds, and multi-agent output for detailed progress messages
+- **Agent Completion Summary** — workflow results include per-agent output summaries
+- **15 Unit Tests + 30 Integration Tests** — including rich progress, agent summary, truncation
+
+**v0.10.1:**
 - **Workflow Completion Callback** — `/run <workflow>` sends results back to Telegram when the workflow finishes (verdict, timing, evaluation summary)
 - **`/run --wait` Mode** — blocks with periodic progress updates until the workflow completes
 - **Vault Policy Authorization** — each bridge command checks `harness:bridge:telegram:<cmd>` policy before executing; graceful denial on failure
 - **Robust Markdown Escaping** — `escape_markdown()` helper for safe Telegram MarkdownV1 output with automatic plain-text fallback
 - **Active Workspace Discovery** — `/run` auto-finds a registered workspace with `.harness/` to run workflows in
-- **10 Unit Tests + 30 Integration Tests** — including markdown escaping, parse\_run\_args, verdict extraction, policy mapping
 
 **v0.10.0:**
 - **Telegram Command Bridge** — `harness bridge telegram start/status/stop` for chat-based control
@@ -597,20 +603,30 @@ harness bridge telegram start
 ```
 /run standard
   → "Workflow 'standard' started (PID 12345) in /home/user/projects/myapp
-     You'll get a result when it finishes."
-  ... (workflow runs) ...
+     You'll get a result when it finishes (timeout: 30m)."
+  ... (workflow runs in background) ...
   → "Workflow 'standard' completed (142s)
-     Verdict: PASS"
+     Verdict: PASS
+
+     Agents:
+       my-builder: output (2048 bytes)"
 
 /run standard --wait
   → "Workflow 'standard' started (PID 12345)
      Waiting for completion (timeout: 30m)..."
-  → "Still running... (60s)
-     Latest: Build phase complete"
+  → "Workflow 'standard' running... (60s)
+     Status: Build phase 2 in progress
+       my-builder: Implementing authentication module...
+     Feedback rounds completed: 1"
   → "Workflow 'standard' completed (142s)
      Verdict: PASS
+
      ## Evaluation Summary
-     All acceptance criteria met."
+     All acceptance criteria met.
+
+     Agents:
+       my-planner: output (512 bytes)
+       my-builder: output (4096 bytes)"
 ```
 
 The default mode (no `--wait`) returns immediately and sends results asynchronously when the workflow finishes. The `--wait` mode sends progress updates every 60 seconds and blocks until completion (30-minute timeout).
@@ -626,7 +642,24 @@ All bridge commands check SanctumAI vault policies before executing:
 | `harness:bridge:telegram:agent` | `/agent` commands |
 | `harness:bridge:telegram:vault` | `/vault` commands |
 
-If the vault is unreachable or policies aren't configured, commands are allowed by default (having stored credentials is considered sufficient authorization). When a policy denies a command, the bot replies with a clear denial message.
+By default, if the vault is unreachable or policies aren't configured, commands are **allowed** (having stored credentials is considered sufficient authorization). For shared deployments, enable **strict mode** to deny by default:
+
+```toml
+# ~/.config/harness/config.toml
+[bridge]
+strict_policy_mode = true          # deny when vault unreachable or policy missing
+workflow_timeout_minutes = 45      # max runtime for bridge-triggered workflows (default: 30)
+```
+
+Per-workflow timeouts can also be set in workflow TOML files:
+
+```toml
+# ~/.config/harness/workflows/long-build.toml
+name = "long-build"
+timeout_minutes = 60    # overrides global bridge config for this workflow
+```
+
+When a policy denies a command, the bot replies with a clear denial message including the policy name.
 
 ### Management
 
@@ -976,7 +1009,14 @@ Harness is evolving from a thin orchestrator into a full local-first agent platf
 - Active workspace discovery for workflow execution
 - 10 unit tests + 30 integration tests
 
-**Phase 20: Agent Specialization + Cross-Project Learning**
+**Phase 20: Telegram Bridge Final Polish + Configurable Timeouts & Rich Progress (done)**
+- Configurable workflow timeout: global `[bridge].workflow_timeout_minutes` + per-workflow `timeout_minutes`
+- Strict policy mode: `strict_policy_mode = true` denies commands when vault is unreachable
+- Rich progress in `--wait` mode: per-agent status, feedback round counts, multi-agent output
+- Agent completion summary in workflow result messages
+- 15 unit tests + 30 integration tests
+
+**Phase 21: Agent Specialization + Cross-Project Learning**
 - Agent specialization (frontend, backend, testing)
 - Cross-project learning via Shared Context Layer
 

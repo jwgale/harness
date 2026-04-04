@@ -6,6 +6,7 @@ use crate::xdg;
 #[derive(Debug, Deserialize, Default)]
 pub struct GlobalConfig {
     pub shared_context: Option<SharedContextConfig>,
+    pub bridge: Option<BridgeConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -29,6 +30,24 @@ impl SharedContextConfig {
     }
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct BridgeConfig {
+    /// When true, unknown/unimplemented policies deny by default (default: false)
+    pub strict_policy_mode: Option<bool>,
+    /// Default workflow timeout in minutes for bridge-triggered runs (default: 30)
+    pub workflow_timeout_minutes: Option<u64>,
+}
+
+impl BridgeConfig {
+    pub fn strict_policy_mode(&self) -> bool {
+        self.strict_policy_mode.unwrap_or(false)
+    }
+
+    pub fn workflow_timeout_minutes(&self) -> u64 {
+        self.workflow_timeout_minutes.unwrap_or(30)
+    }
+}
+
 impl GlobalConfig {
     pub fn load() -> Self {
         let path = xdg::config_dir().join("config.toml");
@@ -43,6 +62,13 @@ impl GlobalConfig {
 
     pub fn scl(&self) -> Option<&SharedContextConfig> {
         self.shared_context.as_ref().filter(|s| s.is_enabled())
+    }
+
+    pub fn bridge(&self) -> BridgeConfig {
+        self.bridge.clone().unwrap_or(BridgeConfig {
+            strict_policy_mode: None,
+            workflow_timeout_minutes: None,
+        })
     }
 }
 
@@ -61,6 +87,10 @@ pub fn ensure_global_config() -> Result<(), String> {
 enabled = true
 url = "http://127.0.0.1:3100/mcp"
 auto_record = true
+
+# [bridge]
+# strict_policy_mode = false      # deny unknown policies by default
+# workflow_timeout_minutes = 30    # max runtime for bridge-triggered workflows
 "#;
 
     fs::write(&path, default)

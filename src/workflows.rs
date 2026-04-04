@@ -37,6 +37,8 @@ pub struct WorkflowDef {
     pub description: Option<String>,
     /// Default maximum rounds for iterative loops (default: 3)
     pub max_rounds: Option<u32>,
+    /// Timeout in minutes for bridge-triggered runs (overrides global config)
+    pub timeout_minutes: Option<u64>,
     /// Ordered list of steps to execute
     pub steps: Vec<WorkflowStep>,
 }

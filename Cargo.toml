@@ -1,6 +1,6 @@
 [package]
 name = "harness"
-version = "0.10.1"
+version = "0.10.2"
 edition = "2024"
 description = "CLI harness for planner → builder → evaluator loops using subscription CLI tools"
 license = "MIT"
