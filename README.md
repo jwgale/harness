@@ -4,16 +4,22 @@ A CLI tool that orchestrates **planner -> builder -> evaluator** loops using sub
 
 Inspired by [Anthropic's harness architecture](https://www.anthropic.com/engineering/harness-design-long-running-apps) for long-running application development with Opus 4.6.
 
-## v0.10.3 Release Notes
+## v0.11.0 Release Notes
 
-Harness v0.10.3 adds real-time progress and policy robustness to the Telegram bridge.
+Harness v0.11.0 upgrades the progress protocol to sub-second updates via Unix domain sockets with raw agent stdout capture.
 
-**New in v0.10.3:**
+**New in v0.11.0:**
+- **Unix Socket Progress** — bridge creates `.harness/progress.sock`; runner streams `EVENT:`, `STDOUT:`, and `DONE:` messages in real time (sub-second latency)
+- **Raw Agent Stdout** — non-TUI runner now uses streaming mode when progress socket is available, forwarding every agent output line with agent-name prefix
+- **Live Stdout in Telegram** — `/run --wait` shows raw agent output lines like `[my-builder] Compiling main.rs...` as they happen (30s update interval)
+- **Automatic Fallback** — if socket creation fails, falls back to file-based `progress.log` polling (Phase 21 behavior)
+- **22 Unit Tests + 31 Integration Tests** — including socket roundtrip verification
+
+**v0.10.3:**
 - **Real-time Progress Protocol** — multi-agent runner writes timestamped progress to `.harness/progress.log` as agents execute; bridge polls this for live updates
 - **Live Progress in Telegram** — `/run --wait` now shows real-time agent step starts, completions, verdicts, loop iterations, and parallel batch status
 - **Policy Endpoint Optional** — new `require_policy_endpoint = false` (default) makes `_policy` vault endpoint optional with clear docs; set to `true` only if your vault supports it
 - **Improved Error Messages** — policy denial messages now include hints when vault is misconfigured
-- **15 Unit Tests + 31 Integration Tests** — including progress.log verification
 
 **v0.10.2:**
 - **Configurable Workflow Timeout** — set `workflow_timeout_minutes` globally in `[bridge]` config or per-workflow in TOML (default: 30m)
@@ -620,14 +626,15 @@ harness bridge telegram start
 /run standard --wait
   → "Workflow 'standard' started (PID 12345)
      Waiting for completion (timeout: 30m)..."
-  → "Workflow 'standard' running... (60s)
+  → "Workflow 'standard' running... (30s)
 
-     [12:01:00] Step 1/3: agent 'my-planner' started
-     [12:01:15] Planner 'my-planner' done -- spec.md written
-     [12:01:16] Step 2/3: agent 'my-builder' started
-
-     Agents:
-       my-builder: Building authentication module..."
+     Step 1/3: agent 'my-planner' started
+     [my-planner] Analyzing project goal...
+     [my-planner] Writing spec.md with 5 features
+     Planner 'my-planner' done -- spec.md written
+     Step 2/3: agent 'my-builder' started
+     [my-builder] Implementing authentication module
+     [my-builder] Writing src/auth.rs (142 lines)"
   → "Workflow 'standard' completed (142s)
      Verdict: PASS
 
@@ -639,7 +646,7 @@ harness bridge telegram start
        my-builder: output (4096 bytes)"
 ```
 
-The default mode (no `--wait`) returns immediately and sends results asynchronously when the workflow finishes. The `--wait` mode sends progress updates every 60 seconds with live output from `.harness/progress.log`, and blocks until completion.
+The default mode (no `--wait`) returns immediately and sends results asynchronously when the workflow finishes. The `--wait` mode streams live agent stdout via a Unix domain socket (`.harness/progress.sock`) and sends Telegram updates every 30 seconds with the latest output lines. If socket creation fails, it falls back to polling `progress.log`.
 
 ### Permission System
 
@@ -1040,7 +1047,16 @@ Harness is evolving from a thin orchestrator into a full local-first agent platf
 - Improved policy error messages with hints for misconfiguration
 - 15 unit tests + 31 integration tests
 
-**Phase 22: Agent Specialization + Cross-Project Learning**
+**Phase 22: Sub-second Progress Protocol + Raw Stdout Capture (done)**
+- Unix domain socket progress protocol (`.harness/progress.sock`) for sub-second IPC
+- `ProgressSender`/`ProgressListener` with `EVENT:`, `STDOUT:`, `DONE:` message format
+- Non-TUI runner switches to streaming mode when progress socket is available
+- Raw agent stdout lines forwarded with agent-name prefix
+- Telegram bridge creates socket, passes via `HARNESS_PROGRESS_SOCK` env, reads live output
+- Automatic fallback to file-based `progress.log` when socket unavailable
+- 22 unit tests + 31 integration tests
+
+**Phase 23: Agent Specialization + Cross-Project Learning**
 - Agent specialization (frontend, backend, testing)
 - Cross-project learning via Shared Context Layer
 

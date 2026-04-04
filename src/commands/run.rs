@@ -6,10 +6,12 @@ use crate::config::Config;
 use crate::commands::evaluate::Verdict;
 use crate::notifications;
 use crate::plugins::{PluginManager, HookPoint};
+use crate::progress::ProgressSender;
 use crate::prompts;
 use crate::scl_lifecycle;
 use crate::workflows;
 use std::io::{self, Write};
+use std::sync::Arc;
 
 pub fn run(
     backend_override: Option<&str>,
@@ -158,6 +160,9 @@ pub fn run_multi_agent(
     let config = Config::load(&artifacts::harness_dir())?;
     let pm = PluginManager::load();
 
+    // Connect to progress socket if bridge set the env var
+    let progress = ProgressSender::connect_from_env().map(Arc::new);
+
     if let Some(wf_name) = workflow_name {
         let wf = workflows::load(wf_name)?;
 
@@ -178,13 +183,17 @@ pub fn run_multi_agent(
 
         println!("Running workflow '{}' ({} groups from {} steps)", wf.name, groups.len(), wf.steps.len());
         artifacts::clear_progress_log();
-        artifacts::append_progress(&format!("Workflow '{}' started ({} steps)", wf.name, wf.steps.len()));
+        let start_msg = format!("Workflow '{}' started ({} steps)", wf.name, wf.steps.len());
+        artifacts::append_progress(&start_msg);
+        if let Some(ref ps) = progress { ps.event(&start_msg); }
 
-        let result = run_step_groups(&groups, backend_override, &config, &pm);
+        let result = run_step_groups(&groups, backend_override, &config, &pm, progress.as_ref());
 
         let status = if result.is_ok() { "completed" } else { "FAIL" };
         scl_lifecycle::record_agent_run_end(&config.project_name, &name_refs, status);
-        artifacts::append_progress(&format!("Workflow '{}' {status}", wf.name));
+        let done_msg = format!("Workflow '{}' {status}", wf.name);
+        artifacts::append_progress(&done_msg);
+        if let Some(ref ps) = progress { ps.done(&done_msg); }
         println!("\n=== Workflow '{}' {status} ===", wf.name);
         return result;
     }
@@ -208,7 +217,7 @@ pub fn run_multi_agent(
                 }
             }).collect();
             let group = workflows::StepGroup::Parallel(steps);
-            let result = run_step_groups(&[group], backend_override, &config, &pm);
+            let result = run_step_groups(&[group], backend_override, &config, &pm, progress.as_ref());
             let status = if result.is_ok() { "completed" } else { "FAIL" };
             scl_lifecycle::record_agent_run_end(&config.project_name, &names, status);
             println!("\n=== Multi-agent run {status} ===");
@@ -229,7 +238,7 @@ pub fn run_multi_agent(
         let groups: Vec<workflows::StepGroup> = steps.into_iter()
             .map(workflows::StepGroup::Single)
             .collect();
-        let result = run_step_groups(&groups, backend_override, &config, &pm);
+        let result = run_step_groups(&groups, backend_override, &config, &pm, progress.as_ref());
         let status = if result.is_ok() { "completed" } else { "FAIL" };
         scl_lifecycle::record_agent_run_end(&config.project_name, &names, status);
         println!("\n=== Multi-agent run {status} ===");
@@ -246,8 +255,9 @@ pub fn run_step_groups(
     backend_override: Option<&str>,
     config: &Config,
     pm: &PluginManager,
+    progress: Option<&Arc<ProgressSender>>,
 ) -> Result<(), String> {
-    run_step_groups_with_tui(groups, backend_override, config, pm, None)
+    run_step_groups_with_tui(groups, backend_override, config, pm, None, progress)
 }
 
 /// Execute step groups with optional TUI streaming channel.
@@ -257,6 +267,7 @@ pub fn run_step_groups_with_tui(
     config: &Config,
     pm: &PluginManager,
     tui_tx: Option<&std::sync::mpsc::Sender<crate::tui::TuiEvent>>,
+    progress: Option<&Arc<ProgressSender>>,
 ) -> Result<(), String> {
     for (gi, group) in groups.iter().enumerate() {
         match group {
@@ -270,9 +281,13 @@ pub fn run_step_groups_with_tui(
                     ));
                 }
                 println!("\n--- Group {}/{}: agent '{}' ---", gi + 1, groups.len(), step.agent);
-                artifacts::append_progress(&format!("Step {}/{}: agent '{}' started", gi + 1, groups.len(), step.agent));
-                run_single_step_streaming(step, backend_override, config, pm, tui_tx)?;
-                artifacts::append_progress(&format!("Step {}/{}: agent '{}' done", gi + 1, groups.len(), step.agent));
+                let msg = format!("Step {}/{}: agent '{}' started", gi + 1, groups.len(), step.agent);
+                artifacts::append_progress(&msg);
+                if let Some(ps) = progress { ps.event(&msg); }
+                run_single_step_streaming(step, backend_override, config, pm, tui_tx, progress)?;
+                let msg = format!("Step {}/{}: agent '{}' done", gi + 1, groups.len(), step.agent);
+                artifacts::append_progress(&msg);
+                if let Some(ps) = progress { ps.event(&msg); }
             }
             workflows::StepGroup::Parallel(steps) => {
                 let names: Vec<&str> = steps.iter().map(|s| s.agent.as_str()).collect();
@@ -283,11 +298,15 @@ pub fn run_step_groups_with_tui(
                     ));
                 }
                 println!("\n--- Group {}/{}: parallel [{}] ---", gi + 1, groups.len(), names.join(", "));
-                artifacts::append_progress(&format!("Parallel batch: [{}]", names.join(", ")));
+                let msg = format!("Parallel batch: [{}]", names.join(", "));
+                artifacts::append_progress(&msg);
+                if let Some(ps) = progress { ps.event(&msg); }
                 scl_lifecycle::record_parallel_start(&config.project_name, &names);
-                run_parallel_steps(steps, backend_override, config, pm, tui_tx)?;
+                run_parallel_steps(steps, backend_override, config, pm, tui_tx, progress)?;
                 scl_lifecycle::record_parallel_end(&config.project_name, &names);
-                artifacts::append_progress(&format!("Parallel batch done: [{}]", names.join(", ")));
+                let msg = format!("Parallel batch done: [{}]", names.join(", "));
+                artifacts::append_progress(&msg);
+                if let Some(ps) = progress { ps.event(&msg); }
             }
             workflows::StepGroup::Loop { body, evaluator, max_rounds } => {
                 let body_names: Vec<&str> = body.iter().map(|s| s.agent.as_str()).collect();
@@ -301,7 +320,7 @@ pub fn run_step_groups_with_tui(
                     "\n--- Group {}/{}: loop [{}] -> evaluator '{}' (max {max_rounds} rounds) ---",
                     gi + 1, groups.len(), body_names.join(", "), evaluator.agent
                 );
-                run_iterative_loop(body, evaluator, *max_rounds, backend_override, config, pm, tui_tx)?;
+                run_iterative_loop(body, evaluator, *max_rounds, backend_override, config, pm, tui_tx, progress)?;
             }
         }
     }
@@ -315,6 +334,7 @@ fn run_single_step_streaming(
     config: &Config,
     pm: &PluginManager,
     tui_tx: Option<&std::sync::mpsc::Sender<crate::tui::TuiEvent>>,
+    progress: Option<&Arc<ProgressSender>>,
 ) -> Result<Option<Verdict>, String> {
     let mut agent = agents::load(&step.agent)?;
     if step.prompt.is_some() {
@@ -330,8 +350,8 @@ fn run_single_step_streaming(
 
     let prompt = build_agent_prompt(&agent, config)?;
 
-    // Run with streaming when TUI channel is available, otherwise non-streaming
-    let output = run_agent_invocation(&agent, &backend, model, &prompt, timeout, tui_tx)?;
+    // Run with streaming when TUI channel or progress sender is available
+    let output = run_agent_invocation(&agent, &backend, model, &prompt, timeout, tui_tx, progress)?;
 
     match agent.role.as_str() {
         "planner" => {
@@ -390,7 +410,7 @@ fn run_single_step_streaming(
     }
 }
 
-/// Run an agent invocation, using streaming when a TUI channel is available.
+/// Run an agent invocation, using streaming when a TUI channel or progress sender is available.
 fn run_agent_invocation(
     agent: &AgentDef,
     backend: &Backend,
@@ -398,8 +418,10 @@ fn run_agent_invocation(
     prompt: &str,
     timeout: u64,
     tui_tx: Option<&std::sync::mpsc::Sender<crate::tui::TuiEvent>>,
+    progress: Option<&Arc<ProgressSender>>,
 ) -> Result<String, String> {
-    if let Some(tx) = tui_tx {
+    // Use streaming when TUI or progress socket is available
+    if tui_tx.is_some() || progress.is_some() {
         let proc = if agent.role == "builder" {
             cli_backend::run_builder_streaming(backend, model, prompt, timeout)?
         } else {
@@ -410,9 +432,16 @@ fn run_agent_invocation(
         loop {
             match proc.lines.recv_timeout(std::time::Duration::from_millis(50)) {
                 Ok(line) => {
-                    let _ = tx.send(crate::tui::TuiEvent::AgentOutputLine(
-                        name.clone(), line,
-                    ));
+                    // Forward to TUI if available
+                    if let Some(tx) = tui_tx {
+                        let _ = tx.send(crate::tui::TuiEvent::AgentOutputLine(
+                            name.clone(), line.clone(),
+                        ));
+                    }
+                    // Forward to progress socket if available
+                    if let Some(ps) = progress {
+                        ps.stdout(&name, &line);
+                    }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
@@ -433,6 +462,7 @@ fn run_parallel_steps(
     config: &Config,
     pm: &PluginManager,
     tui_tx: Option<&std::sync::mpsc::Sender<crate::tui::TuiEvent>>,
+    progress: Option<&Arc<ProgressSender>>,
 ) -> Result<(), String> {
     let mut handles = Vec::new();
 
@@ -449,8 +479,9 @@ fn run_parallel_steps(
         }
     }
 
-    // Create a shared channel for all agent streaming output
+    // Create shared channels for all agent streaming output
     let tui_tx_clone = tui_tx.cloned();
+    let progress_clone = progress.cloned();
 
     for step in steps {
         let step = step.clone();
@@ -458,6 +489,7 @@ fn run_parallel_steps(
         let backend_str = backend_override.map(|s| s.to_string());
         let config = config.clone();
         let tui_sender = tui_tx_clone.clone();
+        let progress_sender = progress_clone.clone();
 
         let handle = std::thread::spawn(move || -> Result<(), String> {
             let mut agent = agents::load(&step.agent)?;
@@ -476,22 +508,26 @@ fn run_parallel_steps(
 
             let prompt = build_agent_prompt(&agent, &config)?;
 
-            // Use streaming when TUI channel is available
-            let output = if let Some(ref tx) = tui_sender {
+            // Use streaming when TUI channel or progress sender is available
+            let output = if tui_sender.is_some() || progress_sender.is_some() {
                 let proc = if agent.role == "builder" {
                     cli_backend::run_builder_streaming(&backend, &model_owned, &prompt, timeout)?
                 } else {
                     cli_backend::run_oneshot_streaming(&backend, &model_owned, &prompt, timeout)?
                 };
 
-                // Drain streaming lines, forwarding to TUI with agent tag
                 let name = agent.name.clone();
                 loop {
                     match proc.lines.recv_timeout(std::time::Duration::from_millis(50)) {
                         Ok(line) => {
-                            let _ = tx.send(crate::tui::TuiEvent::AgentOutputLine(
-                                name.clone(), line,
-                            ));
+                            if let Some(ref tx) = tui_sender {
+                                let _ = tx.send(crate::tui::TuiEvent::AgentOutputLine(
+                                    name.clone(), line.clone(),
+                                ));
+                            }
+                            if let Some(ref ps) = progress_sender {
+                                ps.stdout(&name, &line);
+                            }
                         }
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
@@ -563,6 +599,7 @@ fn run_parallel_steps(
 }
 
 /// Run an iterative build-evaluate loop.
+#[allow(clippy::too_many_arguments)]
 fn run_iterative_loop(
     body: &[workflows::WorkflowStep],
     evaluator_step: &workflows::WorkflowStep,
@@ -571,6 +608,7 @@ fn run_iterative_loop(
     config: &Config,
     pm: &PluginManager,
     tui_tx: Option<&std::sync::mpsc::Sender<crate::tui::TuiEvent>>,
+    progress: Option<&Arc<ProgressSender>>,
 ) -> Result<(), String> {
     for round in 1..=max_rounds {
         if let Some(tx) = tui_tx {
@@ -580,24 +618,30 @@ fn run_iterative_loop(
             ));
         }
         println!("\n  === Iteration {round}/{max_rounds} ===");
-        artifacts::append_progress(&format!("Loop iteration {round}/{max_rounds}"));
+        let msg = format!("Loop iteration {round}/{max_rounds}");
+        artifacts::append_progress(&msg);
+        if let Some(ps) = progress { ps.event(&msg); }
 
         for step in body {
-            run_single_step_streaming(step, backend_override, config, pm, tui_tx)?;
+            run_single_step_streaming(step, backend_override, config, pm, tui_tx, progress)?;
         }
 
-        let verdict = run_single_step_streaming(evaluator_step, backend_override, config, pm, tui_tx)?;
+        let verdict = run_single_step_streaming(evaluator_step, backend_override, config, pm, tui_tx, progress)?;
 
         scl_lifecycle::record_loop_iteration(&config.project_name, round, max_rounds);
 
         match verdict {
             Some(Verdict::Pass) => {
-                artifacts::append_progress(&format!("Loop completed: PASS (round {round})"));
+                let msg = format!("Loop completed: PASS (round {round})");
+                artifacts::append_progress(&msg);
+                if let Some(ps) = progress { ps.event(&msg); }
                 println!("  Loop completed: PASS on round {round}");
                 return Ok(());
             }
             Some(Verdict::Fail) => {
-                artifacts::append_progress(&format!("Loop failed: FAIL (round {round})"));
+                let msg = format!("Loop failed: FAIL (round {round})");
+                artifacts::append_progress(&msg);
+                if let Some(ps) = progress { ps.event(&msg); }
                 return Err(format!("Loop failed: FAIL on round {round}"));
             }
             Some(Verdict::Revise) => {

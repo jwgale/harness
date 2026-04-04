@@ -13,6 +13,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::global_config::GlobalConfig;
+use crate::progress::{self, ProgressMsg};
 use crate::scl_lifecycle;
 use crate::vault;
 use crate::workflows;
@@ -380,19 +381,32 @@ fn cmd_run(args: &str, creds: &Arc<BotCredentials>) -> String {
             .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
     });
 
+    // Create progress socket for real-time updates
+    let harness_dir = work_dir.join(".harness");
+    let progress_rx = progress::create_listener(&harness_dir).ok();
+    let (sock_path, progress_receiver) = match progress_rx {
+        Some((p, r)) => (Some(p), Some(r)),
+        None => (None, None),
+    };
+
     // Launch workflow via harness CLI
     let binary = match std::env::current_exe() {
         Ok(p) => p.to_string_lossy().to_string(),
         Err(e) => return format!("Failed to find harness binary: {e}"),
     };
 
-    let mut child = match Command::new(&binary)
-        .args(["run", "--workflow", &workflow, "--no-tui"])
+    let mut cmd = Command::new(&binary);
+    cmd.args(["run", "--workflow", &workflow, "--no-tui"])
         .current_dir(&work_dir)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
+        .stderr(std::process::Stdio::piped());
+
+    // Pass progress socket path to runner via env var
+    if let Some(ref sp) = sock_path {
+        cmd.env(progress::PROGRESS_SOCK_ENV, sp);
+    }
+
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return format!("Failed to start workflow: {e}"),
     };
@@ -411,14 +425,17 @@ fn cmd_run(args: &str, creds: &Arc<BotCredentials>) -> String {
         );
         let _ = send_message(&creds_clone, &ack);
 
-        // Poll for completion with progress updates
-        return wait_for_workflow(&mut child, &wf_name, &creds_clone, &work_dir, timeout_secs);
+        return wait_for_workflow(
+            &mut child, &wf_name, &creds_clone, &work_dir, timeout_secs, progress_receiver,
+        );
     }
 
     // Default: fire-and-forget with completion callback thread
     let callback_creds = Arc::clone(creds);
     thread::spawn(move || {
-        workflow_completion_callback(child, &wf_name, &callback_creds, &work_dir_display, timeout_secs);
+        workflow_completion_callback(
+            child, &wf_name, &callback_creds, &work_dir_display, timeout_secs, progress_receiver,
+        );
     });
 
     format!(
@@ -445,17 +462,38 @@ fn parse_run_args(args: &str) -> (String, bool) {
     (workflow, wait)
 }
 
-/// Wait for a workflow child process, sending periodic rich progress updates.
+/// Wait for a workflow child process, sending live progress updates via socket.
 fn wait_for_workflow(
     child: &mut std::process::Child,
     workflow: &str,
     creds: &BotCredentials,
     work_dir: &std::path::Path,
     timeout_secs: u64,
+    progress_rx: Option<std::sync::mpsc::Receiver<ProgressMsg>>,
 ) -> String {
     let start = std::time::Instant::now();
     let mut last_update = std::time::Instant::now();
     let harness_dir = work_dir.join(".harness");
+    // Buffer recent progress messages for periodic Telegram updates
+    let recent_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Spawn a reader thread for progress socket messages
+    let recent_clone = Arc::clone(&recent_lines);
+    if let Some(rx) = progress_rx {
+        thread::spawn(move || {
+            while let Ok(msg) = rx.recv() {
+                let line = msg.display_line();
+                if let Ok(mut buf) = recent_clone.lock() {
+                    buf.push(line);
+                    // Keep only last 20 lines
+                    if buf.len() > 20 {
+                        let drain = buf.len() - 20;
+                        buf.drain(..drain);
+                    }
+                }
+            }
+        });
+    }
 
     loop {
         // Check if process finished
@@ -478,14 +516,14 @@ fn wait_for_workflow(
             );
         }
 
-        // Send rich progress update every 60 seconds
-        if last_update.elapsed().as_secs() >= 60 {
+        // Send progress update every 30 seconds (faster than before since we have live data)
+        if last_update.elapsed().as_secs() >= 30 {
             last_update = std::time::Instant::now();
-            let progress = collect_rich_progress(workflow, &start, &harness_dir);
+            let progress = collect_live_progress(workflow, &start, &recent_lines, &harness_dir);
             let _ = send_message(creds, &progress);
         }
 
-        thread::sleep(Duration::from_secs(WORKFLOW_POLL_INTERVAL_SECS));
+        thread::sleep(Duration::from_secs(2));
     }
 }
 
@@ -496,14 +534,25 @@ fn workflow_completion_callback(
     creds: &BotCredentials,
     work_dir: &str,
     timeout_secs: u64,
+    progress_rx: Option<std::sync::mpsc::Receiver<ProgressMsg>>,
 ) {
     let start = std::time::Instant::now();
     let harness_dir = std::path::PathBuf::from(work_dir).join(".harness");
 
+    // Drain progress messages in background (we don't send them for non-wait mode,
+    // but we need to drain the channel so the sender doesn't block)
+    if let Some(rx) = progress_rx {
+        thread::spawn(move || {
+            while rx.recv().is_ok() {} // drain until sender disconnects
+        });
+    }
+
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let result = format_completion_result(workflow, &start, status.success(), &mut child, &harness_dir);
+                let result = format_completion_result(
+                    workflow, &start, status.success(), &mut child, &harness_dir,
+                );
                 scl_lifecycle::record_bridge_response("telegram", "/run", &result);
                 let _ = send_message(creds, &result);
                 return;
@@ -582,7 +631,39 @@ fn format_completion_result(
     result
 }
 
-/// Collect rich progress info from the harness directory.
+/// Collect live progress from socket-buffered messages + file state.
+fn collect_live_progress(
+    workflow: &str,
+    start: &std::time::Instant,
+    recent_lines: &Arc<Mutex<Vec<String>>>,
+    harness_dir: &std::path::Path,
+) -> String {
+    let elapsed = start.elapsed().as_secs();
+    let mut lines = vec![format!("Workflow '{workflow}' running... ({elapsed}s)")];
+
+    // Show recent socket-delivered lines (live agent output)
+    if let Ok(buf) = recent_lines.lock()
+        && !buf.is_empty()
+    {
+        lines.push(String::new());
+        // Show last 8 lines to keep message compact
+        let start_idx = if buf.len() > 8 { buf.len() - 8 } else { 0 };
+        for line in &buf[start_idx..] {
+            lines.push(truncate_line(line, 120));
+        }
+    }
+
+    // Fall back to file-based progress if no socket data
+    if let Ok(buf) = recent_lines.lock()
+        && buf.is_empty()
+    {
+        return collect_rich_progress(workflow, start, harness_dir);
+    }
+
+    lines.join("\n")
+}
+
+/// Collect rich progress info from the harness directory (file-based fallback).
 ///
 /// Reads the progress.log (written by the runner in real time), per-agent
 /// status files, and feedback rounds for a detailed progress message.

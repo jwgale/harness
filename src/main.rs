@@ -8,6 +8,7 @@ mod evaluator;
 mod global_config;
 mod notifications;
 mod plugins;
+mod progress;
 mod prompts;
 mod scl;
 mod scl_lifecycle;

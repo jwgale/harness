@@ -564,7 +564,7 @@ fn run_multi_agent_with_events(
             format!("Running workflow '{}' ({} groups)", wf.name, groups.len())
         ));
 
-        let result = run_step_groups_with_tui(&groups, backend_override, &config, &pm, Some(tx));
+        let result = run_step_groups_with_tui(&groups, backend_override, &config, &pm, Some(tx), None);
 
         let status = if result.is_ok() { "completed" } else { "FAIL" };
         scl_lifecycle::record_agent_run_end(&config.project_name, &name_refs, status);
@@ -599,7 +599,7 @@ fn run_multi_agent_with_events(
             steps.into_iter().map(workflows::StepGroup::Single).collect()
         };
 
-        let result = run_step_groups_with_tui(&groups, backend_override, &config, &pm, Some(tx));
+        let result = run_step_groups_with_tui(&groups, backend_override, &config, &pm, Some(tx), None);
         let status = if result.is_ok() { "completed" } else { "FAIL" };
         scl_lifecycle::record_agent_run_end(&config.project_name, &names, status);
         let _ = tx.send(TuiEvent::PhaseChange(TuiPhase::Done, 0));
