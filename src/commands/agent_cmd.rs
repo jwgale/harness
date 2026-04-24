@@ -29,6 +29,18 @@ pub fn list() -> Result<(), String> {
         if let Some(tools) = &agent.tools {
             println!("    tools: {}", tools.join(", "));
         }
+        let specializations = agent.specialization_tags();
+        if !specializations.is_empty() {
+            println!("    specializations: {}", specializations.join(", "));
+        }
+        let defaults = agent.default_for_tags();
+        if !defaults.is_empty() {
+            println!("    default for: {}", defaults.join(", "));
+        }
+        let context_scopes = agent.context_scope_tags();
+        if !context_scopes.is_empty() {
+            println!("    context scopes: {}", context_scopes.join(", "));
+        }
         if let Some(timeout) = agent.timeout_seconds {
             println!("    timeout: {timeout}s");
         }
@@ -39,7 +51,15 @@ pub fn list() -> Result<(), String> {
 }
 
 /// Add a new agent definition.
-pub fn add(name: &str, role: &str, backend: &str, description: Option<&str>) -> Result<(), String> {
+pub fn add(
+    name: &str,
+    role: &str,
+    backend: &str,
+    description: Option<&str>,
+    specializations: Option<&str>,
+    context_scopes: Option<&str>,
+    default_for: Option<&str>,
+) -> Result<(), String> {
     // Validate role
     let valid_roles = ["planner", "builder", "evaluator", "custom"];
     if !valid_roles.contains(&role) {
@@ -58,7 +78,15 @@ pub fn add(name: &str, role: &str, backend: &str, description: Option<&str>) -> 
         ));
     }
 
-    agents::add(name, role, backend, description)?;
+    agents::add(
+        name,
+        role,
+        backend,
+        description,
+        parse_csv(specializations),
+        parse_csv(context_scopes),
+        parse_csv(default_for),
+    )?;
     println!("Agent '{name}' created ({role}, {backend}).");
     println!(
         "Edit: {}",
@@ -73,4 +101,15 @@ pub fn remove(name: &str) -> Result<(), String> {
     agents::remove(name)?;
     println!("Agent '{name}' removed.");
     Ok(())
+}
+
+fn parse_csv(value: Option<&str>) -> Option<Vec<String>> {
+    let tags: Vec<String> = value?
+        .split(',')
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+
+    if tags.is_empty() { None } else { Some(tags) }
 }

@@ -14,8 +14,11 @@ use crate::xdg;
 /// A workflow step — references an agent by name with optional overrides.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowStep {
-    /// Agent name (must match a defined agent)
+    /// Agent name, or '@specialization' selector
     pub agent: String,
+    /// Required agent specializations for this step
+    #[serde(default)]
+    pub requires: Vec<String>,
     /// Optional prompt override for this step
     pub prompt: Option<String>,
     /// Optional: artifact to write the output to (e.g. "spec.md")
@@ -78,7 +81,7 @@ pub fn plan_execution(wf: &WorkflowDef) -> Vec<StepGroup> {
             // Scan forward for evaluator
             let mut evaluator_idx = None;
             for (j, candidate_step) in steps.iter().enumerate().skip(i) {
-                let candidate = agents::load(&candidate_step.agent).ok();
+                let candidate = agents::resolve(&candidate_step.agent).ok();
                 if candidate
                     .as_ref()
                     .map(|a| a.role == "evaluator")
@@ -146,7 +149,7 @@ pub fn validate(wf: &WorkflowDef) -> Vec<String> {
         let step_label = format!("Step {} (agent '{}')", i + 1, step.agent);
 
         // Check agent exists
-        match agents::load(&step.agent) {
+        match agents::resolve(&step.agent) {
             Ok(agent) => {
                 // Validate backend
                 if !valid_backends.contains(&agent.backend.as_str()) {
@@ -162,6 +165,14 @@ pub fn validate(wf: &WorkflowDef) -> Vec<String> {
                         "{step_label}: invalid role '{}'. Use one of: {}",
                         agent.role,
                         valid_roles.join(", ")
+                    ));
+                }
+                let missing = agent.missing_requirements(&step.requires);
+                if !missing.is_empty() {
+                    errors.push(format!(
+                        "{step_label}: agent '{}' does not satisfy required specialization(s): {}",
+                        agent.name,
+                        missing.join(", ")
                     ));
                 }
                 // Validate loop_until
@@ -189,7 +200,7 @@ pub fn validate(wf: &WorkflowDef) -> Vec<String> {
     for (i, step) in wf.steps.iter().enumerate() {
         if step.loop_until.is_some() {
             let has_evaluator_after = wf.steps[i + 1..].iter().any(|s| {
-                agents::load(&s.agent)
+                agents::resolve(&s.agent)
                     .map(|a| a.role == "evaluator")
                     .unwrap_or(false)
             });
@@ -204,6 +215,14 @@ pub fn validate(wf: &WorkflowDef) -> Vec<String> {
     }
 
     errors
+}
+
+/// Resolve workflow step agent references to concrete agent names.
+pub fn resolved_agent_names(wf: &WorkflowDef) -> Result<Vec<String>, String> {
+    wf.steps
+        .iter()
+        .map(|step| agents::resolve(&step.agent).map(|agent| agent.name))
+        .collect()
 }
 
 /// Discover all workflows from ~/.config/harness/workflows/*.toml

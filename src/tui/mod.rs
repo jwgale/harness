@@ -616,7 +616,7 @@ fn run_multi_agent_with_events(
         }
 
         let groups = workflows::plan_execution(&wf);
-        let agent_names: Vec<String> = wf.steps.iter().map(|s| s.agent.clone()).collect();
+        let agent_names = workflows::resolved_agent_names(&wf)?;
         let name_refs: Vec<&str> = agent_names.iter().map(|s| s.as_str()).collect();
         scl_lifecycle::record_agent_run_start(&config.project_name, &name_refs);
 
@@ -638,7 +638,9 @@ fn run_multi_agent_with_events(
     if let Some(csv) = agents_csv {
         let names: Vec<&str> = csv.split(',').map(|s| s.trim()).collect();
         let defs = crate::commands::run::resolve_agent_names(&names)?;
-        scl_lifecycle::record_agent_run_start(&config.project_name, &names);
+        let agent_names: Vec<String> = defs.iter().map(|agent| agent.name.clone()).collect();
+        let name_refs: Vec<&str> = agent_names.iter().map(|name| name.as_str()).collect();
+        scl_lifecycle::record_agent_run_start(&config.project_name, &name_refs);
 
         if parallel {
             let names_owned: Vec<String> = defs.iter().map(|a| a.name.clone()).collect();
@@ -649,6 +651,7 @@ fn run_multi_agent_with_events(
             .iter()
             .map(|a| workflows::WorkflowStep {
                 agent: a.name.clone(),
+                requires: Vec::new(),
                 prompt: None,
                 output_artifact: None,
                 parallel,
@@ -669,7 +672,7 @@ fn run_multi_agent_with_events(
         let result =
             run_step_groups_with_tui(&groups, backend_override, &config, &pm, Some(tx), None);
         let status = if result.is_ok() { "completed" } else { "FAIL" };
-        scl_lifecycle::record_agent_run_end(&config.project_name, &names, status);
+        scl_lifecycle::record_agent_run_end(&config.project_name, &name_refs, status);
         let _ = tx.send(TuiEvent::PhaseChange(TuiPhase::Done, 0));
         return result;
     }

@@ -4,6 +4,9 @@ name = "security-reviewer"
 role = "custom"
 backend = "codex"
 description = "Reviews code for security vulnerabilities"
+specializations = ["security", "audit"]
+context_scopes = ["security", "dependencies"]
+default_for = ["security"]
 prompt_template = """
 You are a security reviewer. Inspect the codebase for:
 1. OWASP Top 10 vulnerabilities

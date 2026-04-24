@@ -25,8 +25,24 @@ jobs:
       - name: Clippy
         run: cargo clippy -- -D warnings
 
+      - name: Install audit tools
+        run: |
+          cargo install cargo-audit --locked
+          cargo install cargo-deny --locked
+          cargo install cargo-machete --locked
+          cargo install cargo-nextest --locked
+
+      - name: Dependency policy
+        run: cargo deny check
+
+      - name: Security audit
+        run: cargo audit
+
+      - name: Unused dependencies
+        run: cargo machete
+
       - name: Test
-        run: cargo test
+        run: cargo nextest run
 
       - name: Release build
         run: cargo build --release

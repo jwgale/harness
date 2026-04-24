@@ -4,4 +4,7 @@ name = "my-builder"
 role = "builder"
 backend = "codex"
 description = "Implements the spec with full file I/O access"
+specializations = ["backend"]
+context_scopes = ["backend", "implementation"]
+default_for = ["backend"]
 timeout_seconds = 1800

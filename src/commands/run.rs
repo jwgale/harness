@@ -4,10 +4,12 @@ use crate::cli_backend::{self, Backend};
 use crate::commands::evaluate::Verdict;
 use crate::commands::{build, evaluate, plan};
 use crate::config::Config;
+use crate::global_config::GlobalConfig;
 use crate::notifications;
 use crate::plugins::{HookPoint, PluginManager};
 use crate::progress::ProgressSender;
 use crate::prompts;
+use crate::scl;
 use crate::scl_lifecycle;
 use crate::workflows;
 use std::io::{self, Write};
@@ -184,7 +186,7 @@ pub fn run_multi_agent(
         }
 
         let groups = workflows::plan_execution(&wf);
-        let agent_names: Vec<String> = wf.steps.iter().map(|s| s.agent.clone()).collect();
+        let agent_names = workflows::resolved_agent_names(&wf)?;
         let name_refs: Vec<&str> = agent_names.iter().map(|s| s.as_str()).collect();
         scl_lifecycle::record_agent_run_start(&config.project_name, &name_refs);
 
@@ -217,7 +219,9 @@ pub fn run_multi_agent(
         let names: Vec<&str> = csv.split(',').map(|s| s.trim()).collect();
         // Validate all agents exist before starting
         let defs = resolve_agent_names(&names)?;
-        scl_lifecycle::record_agent_run_start(&config.project_name, &names);
+        let agent_names: Vec<String> = defs.iter().map(|agent| agent.name.clone()).collect();
+        let name_refs: Vec<&str> = agent_names.iter().map(|name| name.as_str()).collect();
+        scl_lifecycle::record_agent_run_start(&config.project_name, &name_refs);
 
         if parallel {
             println!("Running {} agents in parallel: {csv}", defs.len());
@@ -225,6 +229,7 @@ pub fn run_multi_agent(
                 .iter()
                 .map(|a| workflows::WorkflowStep {
                     agent: a.name.clone(),
+                    requires: Vec::new(),
                     prompt: None,
                     output_artifact: None,
                     parallel: true,
@@ -236,7 +241,7 @@ pub fn run_multi_agent(
             let result =
                 run_step_groups(&[group], backend_override, &config, &pm, progress.as_ref());
             let status = if result.is_ok() { "completed" } else { "FAIL" };
-            scl_lifecycle::record_agent_run_end(&config.project_name, &names, status);
+            scl_lifecycle::record_agent_run_end(&config.project_name, &name_refs, status);
             println!("\n=== Multi-agent run {status} ===");
             return result;
         }
@@ -246,6 +251,7 @@ pub fn run_multi_agent(
             .iter()
             .map(|a| workflows::WorkflowStep {
                 agent: a.name.clone(),
+                requires: Vec::new(),
                 prompt: None,
                 output_artifact: None,
                 parallel: false,
@@ -259,7 +265,7 @@ pub fn run_multi_agent(
             .collect();
         let result = run_step_groups(&groups, backend_override, &config, &pm, progress.as_ref());
         let status = if result.is_ok() { "completed" } else { "FAIL" };
-        scl_lifecycle::record_agent_run_end(&config.project_name, &names, status);
+        scl_lifecycle::record_agent_run_end(&config.project_name, &name_refs, status);
         println!("\n=== Multi-agent run {status} ===");
         return result;
     }
@@ -292,7 +298,7 @@ pub fn run_step_groups_with_tui(
         match group {
             workflows::StepGroup::Single(step) => {
                 if let Some(tx) = tui_tx
-                    && let Ok(agent) = agents::load(&step.agent)
+                    && let Ok(agent) = agents::resolve(&step.agent)
                 {
                     let _ = tx.send(crate::tui::TuiEvent::PhaseChange(
                         crate::tui::TuiPhase::AgentStep(agent.name.clone(), agent.role.clone()),
@@ -400,7 +406,7 @@ fn run_single_step_streaming(
     tui_tx: Option<&std::sync::mpsc::Sender<crate::tui::TuiEvent>>,
     progress: Option<&Arc<ProgressSender>>,
 ) -> Result<Option<Verdict>, String> {
-    let mut agent = agents::load(&step.agent)?;
+    let mut agent = agents::resolve(&step.agent)?;
     if step.prompt.is_some() {
         agent.prompt_template = step.prompt.clone();
     }
@@ -560,7 +566,7 @@ fn run_parallel_steps(
 
     let hook_roles: Vec<String> = steps
         .iter()
-        .filter_map(|s| agents::load(&s.agent).ok().map(|a| a.role))
+        .filter_map(|s| agents::resolve(&s.agent).ok().map(|a| a.role))
         .collect();
 
     for role in &hook_roles {
@@ -578,14 +584,16 @@ fn run_parallel_steps(
 
     for step in steps {
         let step = step.clone();
-        let agent_name = step.agent.clone();
+        let agent_name = agents::resolve(&step.agent)
+            .map(|agent| agent.name)
+            .unwrap_or_else(|_| step.agent.clone());
         let backend_str = backend_override.map(|s| s.to_string());
         let config = config.clone();
         let tui_sender = tui_tx_clone.clone();
         let progress_sender = progress_clone.clone();
 
         let handle = std::thread::spawn(move || -> Result<(), String> {
-            let mut agent = agents::load(&step.agent)?;
+            let mut agent = agents::resolve(&step.agent)?;
             if step.prompt.is_some() {
                 agent.prompt_template = step.prompt.clone();
             }
@@ -791,30 +799,99 @@ pub fn build_agent_prompt(agent: &AgentDef, config: &Config) -> Result<String, S
         return Ok(template.clone());
     }
 
-    match agent.role.as_str() {
+    let prompt = match agent.role.as_str() {
         "planner" => {
             let goal = artifacts::read_artifact("goal.md")?;
-            Ok(prompts::planner_prompt(&goal))
+            prompts::planner_prompt(&goal)
         }
-        "builder" => prompts::builder_prompt(),
-        "evaluator" => prompts::evaluator_prompt(),
+        "builder" => prompts::builder_prompt()?,
+        "evaluator" => prompts::evaluator_prompt()?,
         _ => {
             let goal = artifacts::read_artifact("goal.md").unwrap_or_default();
             let spec = artifacts::read_artifact("spec.md").unwrap_or_default();
-            Ok(format!(
+            format!(
                 "You are a '{}' agent for project '{}'.\n\n## Goal\n{goal}\n\n## Spec\n{spec}\n",
                 agent.role, config.project_name
-            ))
+            )
         }
-    }
+    };
+
+    let learning = cross_project_learning(agent, config);
+    Ok(with_agent_context(agent, &prompt, learning.as_deref()))
 }
 
 /// Resolve a comma-separated list of agent names into definitions.
 pub fn resolve_agent_names(names: &[&str]) -> Result<Vec<AgentDef>, String> {
     let mut defs = Vec::new();
     for name in names {
-        let agent = agents::load(name)?;
+        let agent = agents::resolve(name)?;
         defs.push(agent);
     }
     Ok(defs)
+}
+
+fn with_agent_context(agent: &AgentDef, prompt: &str, learning: Option<&str>) -> String {
+    let identity = agent.identity_summary().map(|summary| {
+        format!(
+            "You are Harness agent '{}' with role '{}'. {summary}",
+            agent.name, agent.role
+        )
+    });
+
+    match (identity, learning) {
+        (Some(identity), Some(learning)) => {
+            format!("{identity}\n\n## Cross-Project Context\n{learning}\n\n{prompt}")
+        }
+        (Some(identity), None) => format!("{identity}\n\n{prompt}"),
+        (None, Some(learning)) => format!("## Cross-Project Context\n{learning}\n\n{prompt}"),
+        (None, None) => prompt.to_string(),
+    }
+}
+
+fn cross_project_learning(agent: &AgentDef, config: &Config) -> Option<String> {
+    let mut tags = agent.context_scope_tags();
+    tags.extend(agent.specialization_tags());
+    tags.sort();
+    tags.dedup();
+    if tags.is_empty() {
+        return None;
+    }
+
+    let gc = GlobalConfig::load();
+    let scl_cfg = gc.scl()?;
+    if !scl::is_healthy(scl_cfg.url()) {
+        return None;
+    }
+
+    let query = format!(
+        "Relevant conventions, gotchas, and prior decisions for project '{}' and agent '{}' with role '{}' and scopes: {}",
+        config.project_name,
+        agent.name,
+        agent.role,
+        tags.join(", ")
+    );
+
+    match scl::query(scl_cfg.url(), &query) {
+        Ok(text) => {
+            let text = text.trim();
+            if text.is_empty() {
+                None
+            } else {
+                Some(truncate_owned(text, 4000))
+            }
+        }
+        Err(_) => None,
+    }
+}
+
+fn truncate_owned(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &s[..end])
 }

@@ -7,11 +7,13 @@ description = "Plan, then build frontend and backend in parallel, then evaluate"
 agent = "my-planner"
 
 [[steps]]
-agent = "frontend-builder"
+agent = "@frontend"
+requires = ["frontend"]
 parallel = true
 
 [[steps]]
-agent = "backend-builder"
+agent = "@backend"
+requires = ["backend"]
 parallel = true
 
 [[steps]]

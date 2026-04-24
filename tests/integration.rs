@@ -34,6 +34,24 @@ fn run_harness_in(dir: &PathBuf, args: &[&str]) -> (String, String, bool) {
     (stdout, stderr, output.status.success())
 }
 
+fn run_harness_in_env(
+    dir: &PathBuf,
+    args: &[&str],
+    xdg_config_home: &PathBuf,
+    xdg_data_home: &PathBuf,
+) -> (String, String, bool) {
+    let output = Command::new(harness_bin())
+        .args(args)
+        .current_dir(dir)
+        .env("XDG_CONFIG_HOME", xdg_config_home)
+        .env("XDG_DATA_HOME", xdg_data_home)
+        .output()
+        .expect("Failed to run harness");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    (stdout, stderr, output.status.success())
+}
+
 fn tempdir(label: &str) -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("harness-test-{label}-{}-{n}", std::process::id()));
@@ -403,6 +421,46 @@ fn test_agent_add_remove() {
 }
 
 #[test]
+fn test_agent_add_with_specializations() {
+    let agents_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp/.config"))
+        .join("harness/agents");
+    fs::create_dir_all(&agents_dir).unwrap();
+    fs::remove_file(agents_dir.join("test-specialized.toml")).ok();
+
+    let (stdout, _, ok) = run_harness(&[
+        "agent",
+        "add",
+        "test-specialized",
+        "--role",
+        "builder",
+        "--backend",
+        "mock",
+        "--specializations",
+        "frontend,react",
+        "--context-scopes",
+        "ui,web",
+        "--default-for",
+        "frontend",
+    ]);
+    assert!(ok, "agent add failed: {stdout}");
+
+    let content = fs::read_to_string(agents_dir.join("test-specialized.toml")).unwrap();
+    assert!(content.contains("specializations"));
+    assert!(content.contains("frontend"));
+    assert!(content.contains("context_scopes"));
+    assert!(content.contains("default_for"));
+
+    let (stdout, _, ok) = run_harness(&["agent", "list"]);
+    assert!(ok, "agent list failed: {stdout}");
+    assert!(stdout.contains("specializations: frontend, react"));
+    assert!(stdout.contains("default for: frontend"));
+    assert!(stdout.contains("context scopes: ui, web"));
+
+    fs::remove_file(agents_dir.join("test-specialized.toml")).ok();
+}
+
+#[test]
 fn test_agent_add_invalid_role() {
     let (_, stderr, ok) = run_harness(&[
         "agent",
@@ -647,6 +705,143 @@ agent = "nonexistent-agent"
     fs::remove_file(agents_dir.join("val-builder.toml")).ok();
     fs::remove_file(workflows_dir.join("valid-wf.toml")).ok();
     fs::remove_file(workflows_dir.join("invalid-wf.toml")).ok();
+}
+
+#[test]
+fn test_workflow_specialization_selector_and_requirements() {
+    let tmp = tempdir("specialization");
+    run_harness_in(&tmp, &["init", "Specialized workflow test"]);
+
+    let agents_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp/.config"))
+        .join("harness/agents");
+    let workflows_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp/.config"))
+        .join("harness/workflows");
+    fs::create_dir_all(&agents_dir).unwrap();
+    fs::create_dir_all(&workflows_dir).unwrap();
+
+    fs::write(
+        agents_dir.join("spec-planner.toml"),
+        "name = \"spec-planner\"\nrole = \"planner\"\nbackend = \"mock\"\nspecializations = [\"planning\"]\ndefault_for = [\"planning\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        agents_dir.join("spec-frontend.toml"),
+        "name = \"spec-frontend\"\nrole = \"builder\"\nbackend = \"mock\"\nspecializations = [\"frontend\", \"react\"]\ndefault_for = [\"frontend\"]\ncontext_scopes = [\"ui\"]\n",
+    )
+    .unwrap();
+
+    fs::write(
+        workflows_dir.join("specialized-flow.toml"),
+        r#"
+name = "specialized-flow"
+[[steps]]
+agent = "@planning"
+[[steps]]
+agent = "@frontend"
+requires = ["frontend"]
+"#,
+    )
+    .unwrap();
+
+    let (stdout, stderr, ok) = run_harness(&["workflow", "validate", "specialized-flow"]);
+    assert!(ok, "specialized validation failed: {stdout} {stderr}");
+    assert!(stdout.contains("valid"));
+
+    let (stdout, stderr, ok) =
+        run_harness_in(&tmp, &["run", "--workflow", "specialized-flow", "--no-tui"]);
+    assert!(ok, "specialized workflow run failed: {stdout} {stderr}");
+    assert!(stdout.contains("Workflow 'specialized-flow' completed"));
+    assert!(tmp.join(".harness/status.md").exists());
+
+    fs::write(
+        workflows_dir.join("missing-specialization.toml"),
+        r#"
+name = "missing-specialization"
+[[steps]]
+agent = "@frontend"
+requires = ["backend"]
+"#,
+    )
+    .unwrap();
+
+    let (stdout, stderr, ok) = run_harness(&["workflow", "validate", "missing-specialization"]);
+    assert!(!ok, "workflow should fail missing specialization");
+    assert!(
+        stdout.contains("does not satisfy required specialization")
+            || stderr.contains("validation failed")
+    );
+
+    fs::remove_file(agents_dir.join("spec-planner.toml")).ok();
+    fs::remove_file(agents_dir.join("spec-frontend.toml")).ok();
+    fs::remove_file(workflows_dir.join("specialized-flow.toml")).ok();
+    fs::remove_file(workflows_dir.join("missing-specialization.toml")).ok();
+    fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn test_specialized_agent_scl_fallback_when_unreachable() {
+    let tmp = tempdir("sclfallback");
+    let work = tmp.join("work");
+    let config_home = tmp.join("config");
+    let data_home = tmp.join("data");
+    let agents_dir = config_home.join("harness/agents");
+    let workflows_dir = config_home.join("harness/workflows");
+    fs::create_dir_all(&work).unwrap();
+    fs::create_dir_all(&agents_dir).unwrap();
+    fs::create_dir_all(&workflows_dir).unwrap();
+    fs::create_dir_all(config_home.join("harness")).unwrap();
+
+    fs::write(
+        config_home.join("harness/config.toml"),
+        r#"
+[shared_context]
+enabled = true
+url = "http://127.0.0.1:9/mcp"
+auto_record = true
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        agents_dir.join("scl-builder.toml"),
+        "name = \"scl-builder\"\nrole = \"builder\"\nbackend = \"mock\"\nspecializations = [\"backend\"]\ncontext_scopes = [\"backend\"]\ndefault_for = [\"backend\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        workflows_dir.join("scl-fallback.toml"),
+        r#"
+name = "scl-fallback"
+[[steps]]
+agent = "@backend"
+requires = ["backend"]
+"#,
+    )
+    .unwrap();
+
+    let (stdout, stderr, ok) = run_harness_in_env(
+        &work,
+        &["init", "SCL fallback test"],
+        &config_home,
+        &data_home,
+    );
+    assert!(ok, "init failed: {stdout} {stderr}");
+    fs::write(work.join(".harness/spec.md"), "# SCL fallback spec").unwrap();
+
+    let (stdout, stderr, ok) = run_harness_in_env(
+        &work,
+        &["run", "--workflow", "scl-fallback", "--no-tui"],
+        &config_home,
+        &data_home,
+    );
+    assert!(
+        ok,
+        "workflow should not fail when SCL is unreachable: {stdout} {stderr}"
+    );
+    assert!(stdout.contains("Workflow 'scl-fallback' completed"));
+
+    fs::remove_dir_all(&tmp).ok();
 }
 
 #[test]

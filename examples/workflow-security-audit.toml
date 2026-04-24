@@ -10,7 +10,8 @@ agent = "my-planner"
 agent = "my-builder"
 
 [[steps]]
-agent = "security-reviewer"
+agent = "@security"
+requires = ["security"]
 
 [[steps]]
 agent = "my-evaluator"

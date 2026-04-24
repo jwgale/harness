@@ -259,6 +259,15 @@ enum AgentAction {
         /// Optional description
         #[arg(long)]
         description: Option<String>,
+        /// Comma-separated specializations, e.g. frontend,react
+        #[arg(long)]
+        specializations: Option<String>,
+        /// Comma-separated Shared Context Layer scopes
+        #[arg(long)]
+        context_scopes: Option<String>,
+        /// Comma-separated selector aliases this agent should default for
+        #[arg(long)]
+        default_for: Option<String>,
     },
     /// Remove an agent definition
     Remove {
@@ -404,7 +413,18 @@ fn main() {
                 role,
                 backend,
                 description,
-            } => commands::agent_cmd::add(&name, &role, &backend, description.as_deref()),
+                specializations,
+                context_scopes,
+                default_for,
+            } => commands::agent_cmd::add(
+                &name,
+                &role,
+                &backend,
+                description.as_deref(),
+                specializations.as_deref(),
+                context_scopes.as_deref(),
+                default_for.as_deref(),
+            ),
             AgentAction::Remove { name } => commands::agent_cmd::remove(&name),
         },
         Commands::Workflow { action } => match action {

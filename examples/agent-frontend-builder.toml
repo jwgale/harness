@@ -1,0 +1,10 @@
+# Example frontend builder agent definition
+# Copy to ~/.config/harness/agents/
+name = "frontend-builder"
+role = "builder"
+backend = "codex"
+description = "Implements frontend UI and client-side behavior"
+specializations = ["frontend", "react", "ui"]
+context_scopes = ["frontend", "ui", "web"]
+default_for = ["frontend"]
+timeout_seconds = 1800

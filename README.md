@@ -740,6 +740,9 @@ description = "Plans the build from the project goal"
 # timeout_seconds = 600        # optional timeout
 # prompt_template = "..."      # inline prompt or file path
 # tools = ["git", "grep"]      # optional tool list
+# specializations = ["frontend", "react"]   # optional selector tags
+# context_scopes = ["ui", "web"]            # optional SCL scopes
+# default_for = ["frontend"]                # optional @selector default
 ```
 
 Valid roles: `planner`, `builder`, `evaluator`, `custom`.
@@ -747,7 +750,8 @@ Valid roles: `planner`, `builder`, `evaluator`, `custom`.
 ```bash
 # Create agents via CLI
 harness agent add my-planner --role planner --backend codex
-harness agent add my-builder --role builder --backend codex
+harness agent add my-builder --role builder --backend codex \
+  --specializations frontend,react --default-for frontend
 harness agent add my-evaluator --role evaluator --backend codex
 
 # List defined agents
@@ -766,6 +770,35 @@ harness run --agents my-planner,my-builder,my-evaluator --no-tui
 ```
 
 Each agent runs in order. Planner agents write `spec.md`, builders write `status.md`, evaluators write `evaluation.md` and return a verdict. Custom agents write their output to `.harness/agent-<name>.md`.
+
+### Specialized Agents
+
+Agents can advertise domain tags and selector aliases:
+
+```toml
+name = "frontend-builder"
+role = "builder"
+backend = "codex"
+specializations = ["frontend", "react"]
+context_scopes = ["ui", "web"]
+default_for = ["frontend"]
+```
+
+Workflows and `--agents` accept `@selector` references. Harness resolves `@frontend` to the single matching agent, preferring an agent that declares `default_for = ["frontend"]`. If multiple agents match and none is the default, validation fails with an ambiguity error.
+
+```bash
+harness run --agents @frontend,my-evaluator --no-tui
+```
+
+Workflow steps can require specializations:
+
+```toml
+[[steps]]
+agent = "@frontend"
+requires = ["frontend"]
+```
+
+Validation checks that the resolved agent satisfies every `requires` tag before the workflow runs.
 
 ### Parallel Execution
 
@@ -871,7 +904,9 @@ harness workflow list
 
 Validation checks:
 - All referenced agents exist
+- `@selector` agent references resolve to a single concrete agent
 - Agent backends and roles are valid
+- Required step specializations are satisfied
 - `loop_until` steps have a subsequent evaluator
 - No structural errors
 
@@ -896,6 +931,8 @@ Multi-agent runs automatically record to the Shared Context Layer:
 - Parallel execution groups (start/end)
 - Iterative loop iterations
 - Final run outcome
+
+Specialized agents also query SCL before default prompts are sent when `context_scopes` or `specializations` are present and SCL is reachable. The retrieved cross-project context is prepended to the prompt with the agent identity. If SCL is disabled or unreachable, the run continues without injected context.
 
 Example agent and workflow templates are in the `examples/` directory of this repo.
 
@@ -1091,8 +1128,10 @@ Harness is evolving from a thin orchestrator into a full local-first agent platf
 - Client read timeout + shutdown check for clean thread exit
 - 27 unit tests + 31 integration tests
 
-**Phase 25: Agent Specialization + Cross-Project Learning**
-- Agent specialization (frontend, backend, testing)
+**Phase 25: Agent Specialization + Cross-Project Learning (in progress)**
+- Agent specialization metadata: `specializations`, `context_scopes`, `default_for`
+- `@selector` routing for workflows and ad-hoc `--agents`
+- Workflow `requires` validation for specialized steps
 - Cross-project learning via Shared Context Layer
 
 ## License
