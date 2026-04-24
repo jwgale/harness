@@ -59,12 +59,13 @@ pub fn discover() -> Vec<AgentDef> {
 pub fn load(name: &str) -> Result<AgentDef, String> {
     let path = agent_path(name);
     if !path.exists() {
-        return Err(format!("Agent '{name}' not found. Use `harness agent list` to see available agents."));
+        return Err(format!(
+            "Agent '{name}' not found. Use `harness agent list` to see available agents."
+        ));
     }
-    let content = fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read agent '{name}': {e}"))?;
-    toml::from_str(&content)
-        .map_err(|e| format!("Failed to parse agent '{name}': {e}"))
+    let content =
+        fs::read_to_string(&path).map_err(|e| format!("Failed to read agent '{name}': {e}"))?;
+    toml::from_str(&content).map_err(|e| format!("Failed to parse agent '{name}': {e}"))
 }
 
 /// Create a new agent definition file.
@@ -86,10 +87,9 @@ pub fn add(name: &str, role: &str, backend: &str, description: Option<&str>) -> 
         description: description.map(|s| s.to_string()),
     };
 
-    let content = toml::to_string_pretty(&agent)
-        .map_err(|e| format!("Failed to serialize agent: {e}"))?;
-    fs::write(&path, content)
-        .map_err(|e| format!("Failed to write agent file: {e}"))?;
+    let content =
+        toml::to_string_pretty(&agent).map_err(|e| format!("Failed to serialize agent: {e}"))?;
+    fs::write(&path, content).map_err(|e| format!("Failed to write agent file: {e}"))?;
 
     Ok(())
 }
@@ -100,8 +100,7 @@ pub fn remove(name: &str) -> Result<(), String> {
     if !path.exists() {
         return Err(format!("Agent '{name}' not found."));
     }
-    fs::remove_file(&path)
-        .map_err(|e| format!("Failed to remove agent '{name}': {e}"))
+    fs::remove_file(&path).map_err(|e| format!("Failed to remove agent '{name}': {e}"))
 }
 
 /// Get the file path for an agent TOML.

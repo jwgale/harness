@@ -3,7 +3,7 @@ use crate::cli_backend::Backend;
 use crate::config::Config;
 use crate::evaluator;
 use crate::notifications;
-use crate::plugins::{PluginManager, HookPoint};
+use crate::plugins::{HookPoint, PluginManager};
 use crate::scl_lifecycle;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -24,7 +24,10 @@ pub fn run(backend_override: Option<&str>) -> Result<Verdict, String> {
     }
 
     pm.fire(HookPoint::BeforeEvaluate);
-    println!("Running evaluator (strategy: {})...", config.evaluator_strategy);
+    println!(
+        "Running evaluator (strategy: {})...",
+        config.evaluator_strategy
+    );
     let output = evaluator::run_strategy(&config, &backend)?;
 
     // Save evaluation
@@ -38,8 +41,10 @@ pub fn run(backend_override: Option<&str>) -> Result<Verdict, String> {
     let verdict = parse_verdict(&output);
     pm.fire(HookPoint::AfterEvaluate);
     scl_lifecycle::record_eval_complete(
-        &config.project_name, round,
-        &format!("{verdict:?}"), &config.evaluator_strategy,
+        &config.project_name,
+        round,
+        &format!("{verdict:?}"),
+        &config.evaluator_strategy,
     );
 
     // Fire notification events

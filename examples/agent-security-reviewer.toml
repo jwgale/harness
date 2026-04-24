@@ -2,7 +2,7 @@
 # Copy to ~/.config/harness/agents/
 name = "security-reviewer"
 role = "custom"
-backend = "claude"
+backend = "codex"
 description = "Reviews code for security vulnerabilities"
 prompt_template = """
 You are a security reviewer. Inspect the codebase for:

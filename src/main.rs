@@ -20,7 +20,11 @@ mod xdg;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "harness", version, about = "Orchestrate planner → builder → evaluator loops using subscription CLI tools")]
+#[command(
+    name = "harness",
+    version,
+    about = "Orchestrate planner → builder → evaluator loops using subscription CLI tools"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -80,6 +84,12 @@ enum Commands {
     },
     /// Print current harness state from artifacts
     Status,
+    /// Diagnose local Harness, backend, and toolchain readiness
+    Doctor {
+        /// Also run fmt, clippy, and tests
+        #[arg(long)]
+        deep: bool,
+    },
     /// Generate handoff.md for context reset
     Reset,
     /// Show latest evaluator feedback
@@ -339,10 +349,17 @@ fn main() {
                     no_tui,
                 )
             } else {
-                commands::run::run(backend.as_deref(), max_rounds, pause_after_plan, pause_after_eval, no_tui)
+                commands::run::run(
+                    backend.as_deref(),
+                    max_rounds,
+                    pause_after_plan,
+                    pause_after_eval,
+                    no_tui,
+                )
             }
         }
         Commands::Status => commands::status::run(),
+        Commands::Doctor { deep } => commands::doctor::run(deep),
         Commands::Reset => commands::reset::run(),
         Commands::Feedback => commands::feedback::run(),
         Commands::Daemon { action } => match action {
@@ -361,7 +378,11 @@ fn main() {
             WorkspaceAction::Remove { name } => commands::workspace::remove(&name),
         },
         Commands::Schedule { action } => match action {
-            ScheduleAction::Add { name, cron, command } => commands::schedule::add(&name, &cron, &command),
+            ScheduleAction::Add {
+                name,
+                cron,
+                command,
+            } => commands::schedule::add(&name, &cron, &command),
             ScheduleAction::List => commands::schedule::list(),
             ScheduleAction::Remove { name } => commands::schedule::remove(&name),
             ScheduleAction::Run { name } => commands::schedule::run_now(&name),
@@ -378,9 +399,12 @@ fn main() {
         },
         Commands::Agent { action } => match action {
             AgentAction::List => commands::agent_cmd::list(),
-            AgentAction::Add { name, role, backend, description } => {
-                commands::agent_cmd::add(&name, &role, &backend, description.as_deref())
-            }
+            AgentAction::Add {
+                name,
+                role,
+                backend,
+                description,
+            } => commands::agent_cmd::add(&name, &role, &backend, description.as_deref()),
             AgentAction::Remove { name } => commands::agent_cmd::remove(&name),
         },
         Commands::Workflow { action } => match action {

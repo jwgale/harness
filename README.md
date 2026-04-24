@@ -109,6 +109,7 @@ Requires Rust 2024 edition (1.85+).
 
 ```bash
 harness --version
+harness doctor
 ```
 
 ## Prerequisites
@@ -122,17 +123,20 @@ harness --version
 # 1. Initialize a new project harness
 harness init "Build a CLI todo app in Rust with SQLite storage"
 
-# 2. Run the full automated loop (launches TUI)
-harness run --backend claude
+# 2. Run the full automated loop (launches TUI, defaults to Codex)
+harness run
 
 # Or run with human review pauses (plain text mode)
-harness run --backend claude --pause-after-plan --pause-after-eval
+harness run --pause-after-plan --pause-after-eval
 
 # Or run individual phases
-harness plan --backend claude
+harness plan
 # Review/edit .harness/spec.md
-harness build --backend claude
-harness evaluate --backend claude
+harness build
+harness evaluate
+
+# Override the default backend when needed
+harness run --backend claude
 ```
 
 ## Commands
@@ -145,6 +149,7 @@ harness evaluate --backend claude
 | `harness evaluate [--backend claude\|codex]` | Run evaluator to assess the build |
 | `harness run [options]` | Full automated loop: plan -> build -> evaluate -> revise |
 | `harness status` | Print current harness state |
+| `harness doctor [--deep]` | Diagnose backend, toolchain, config, and quality-gate readiness |
 | `harness reset` | Generate `handoff.md` for context reset |
 | `harness feedback` | Show latest evaluator feedback |
 | `harness daemon <action>` | Manage persistent daemon (start/stop/status/logs) |
@@ -184,6 +189,10 @@ harness evaluate --backend claude
 - `--no-tui` — disable TUI, use plain text output
 - `--agents planner,builder,evaluator` — run named agents sequentially (multi-agent mode)
 - `--workflow <name>` — run a named workflow from `~/.config/harness/workflows/`
+
+Codex builder runs use `codex exec --full-auto` by default. If you are already
+running Harness inside an external sandbox and want Codex to bypass its own
+approval and sandbox prompts, set `HARNESS_CODEX_DANGEROUS=1`.
 
 ## How the Loop Works
 
@@ -725,9 +734,9 @@ Agents are TOML files in `~/.config/harness/agents/`:
 # ~/.config/harness/agents/my-planner.toml
 name = "my-planner"
 role = "planner"
-backend = "claude"
+backend = "codex"
 description = "Plans the build from the project goal"
-# model = "claude-opus-4-6"    # optional model override
+# model = "default"            # optional model override
 # timeout_seconds = 600        # optional timeout
 # prompt_template = "..."      # inline prompt or file path
 # tools = ["git", "grep"]      # optional tool list
@@ -737,9 +746,9 @@ Valid roles: `planner`, `builder`, `evaluator`, `custom`.
 
 ```bash
 # Create agents via CLI
-harness agent add my-planner --role planner --backend claude
-harness agent add my-builder --role builder --backend claude
-harness agent add my-evaluator --role evaluator --backend claude
+harness agent add my-planner --role planner --backend codex
+harness agent add my-builder --role builder --backend codex
+harness agent add my-evaluator --role evaluator --backend codex
 
 # List defined agents
 harness agent list
@@ -873,7 +882,7 @@ Create agents with the `custom` role for specialized tasks (security review, doc
 ```toml
 name = "security-reviewer"
 role = "custom"
-backend = "claude"
+backend = "codex"
 prompt_template = "Review the codebase for OWASP Top 10 vulnerabilities..."
 ```
 
@@ -908,8 +917,8 @@ url = "http://127.0.0.1:3100/mcp"
 
 ```json
 {
-  "backend": "claude",
-  "model": "claude-opus-4-6",
+  "backend": "codex",
+  "model": "default",
   "project_name": "my-project",
   "max_eval_rounds": 3,
   "builder_timeout_seconds": 1800,

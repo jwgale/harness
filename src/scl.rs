@@ -48,7 +48,8 @@ pub fn call_tool(url: &str, tool: &str, args: &serde_json::Value) -> Result<Stri
     });
 
     let init_output = curl_post_with_headers(url, &init_body)?;
-    let session_id = init_output.session_id
+    let session_id = init_output
+        .session_id
         .ok_or_else(|| "No Mcp-Session-Id in initialize response".to_string())?;
 
     // Step 2: Send initialized notification
@@ -72,8 +73,8 @@ pub fn call_tool(url: &str, tool: &str, args: &serde_json::Value) -> Result<Stri
     let resp = curl_post(url, &call_body, &session_id)?;
 
     // Parse response
-    let val: serde_json::Value = serde_json::from_str(&resp)
-        .map_err(|e| format!("Failed to parse MCP response: {e}"))?;
+    let val: serde_json::Value =
+        serde_json::from_str(&resp).map_err(|e| format!("Failed to parse MCP response: {e}"))?;
 
     if let Some(err) = val.get("error") {
         return Err(format!("MCP error: {}", err));
@@ -83,7 +84,8 @@ pub fn call_tool(url: &str, tool: &str, args: &serde_json::Value) -> Result<Stri
     if let Some(content) = val.pointer("/result/content")
         && let Some(arr) = content.as_array()
     {
-        let texts: Vec<&str> = arr.iter()
+        let texts: Vec<&str> = arr
+            .iter()
             .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
             .collect();
         if !texts.is_empty() {
@@ -101,18 +103,26 @@ pub fn call_tool(url: &str, tool: &str, args: &serde_json::Value) -> Result<Stri
 
 /// Query the SCL.
 pub fn query(url: &str, query_text: &str) -> Result<String, String> {
-    call_tool(url, "context_query", &serde_json::json!({ "query": query_text }))
+    call_tool(
+        url,
+        "context_query",
+        &serde_json::json!({ "query": query_text }),
+    )
 }
 
 /// Record an entry to the SCL.
 /// `kind` should be one of: architecture, decision, convention, active_work, insight, gotcha
 pub fn record(url: &str, kind: &str, content: &str) -> Result<String, String> {
-    call_tool(url, "context_record", &serde_json::json!({
-        "kind": kind,
-        "content": content,
-        "author": "harness",
-        "source": "agent_session"
-    }))
+    call_tool(
+        url,
+        "context_record",
+        &serde_json::json!({
+            "kind": kind,
+            "content": content,
+            "author": "harness",
+            "source": "agent_session"
+        }),
+    )
 }
 
 struct CurlResponse {
@@ -124,11 +134,18 @@ struct CurlResponse {
 fn curl_post_with_headers(url: &str, body: &serde_json::Value) -> Result<CurlResponse, String> {
     let body_str = body.to_string();
     let output = Command::new("curl")
-        .args(["-si", "-X", "POST",
-               "-H", "Content-Type: application/json",
-               "-H", "Accept: application/json, text/event-stream",
-               "-d", &body_str,
-               url])
+        .args([
+            "-si",
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-H",
+            "Accept: application/json, text/event-stream",
+            "-d",
+            &body_str,
+            url,
+        ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .output()
@@ -137,11 +154,13 @@ fn curl_post_with_headers(url: &str, body: &serde_json::Value) -> Result<CurlRes
     let full = String::from_utf8_lossy(&output.stdout).to_string();
 
     // Split headers from body (blank line separator)
-    let (headers, body) = full.split_once("\r\n\r\n")
+    let (headers, body) = full
+        .split_once("\r\n\r\n")
         .or_else(|| full.split_once("\n\n"))
         .unwrap_or(("", &full));
 
-    let session_id = headers.lines()
+    let session_id = headers
+        .lines()
         .find(|l| l.to_lowercase().starts_with("mcp-session-id:"))
         .map(|l| l.split_once(':').unwrap().1.trim().to_string());
 
@@ -155,12 +174,20 @@ fn curl_post(url: &str, body: &serde_json::Value, session_id: &str) -> Result<St
     let body_str = body.to_string();
     let session_header = format!("Mcp-Session-Id: {session_id}");
     let output = Command::new("curl")
-        .args(["-s", "-X", "POST",
-               "-H", "Content-Type: application/json",
-               "-H", "Accept: application/json, text/event-stream",
-               "-H", &session_header,
-               "-d", &body_str,
-               url])
+        .args([
+            "-s",
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-H",
+            "Accept: application/json, text/event-stream",
+            "-H",
+            &session_header,
+            "-d",
+            &body_str,
+            url,
+        ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .output()
@@ -180,14 +207,12 @@ pub fn generate_mcp_config(scl_url: &str) -> Result<std::path::PathBuf, String> 
     });
 
     let mcp_dir = xdg::cache_dir().join("mcp");
-    fs::create_dir_all(&mcp_dir)
-        .map_err(|e| format!("Failed to create MCP cache dir: {e}"))?;
+    fs::create_dir_all(&mcp_dir).map_err(|e| format!("Failed to create MCP cache dir: {e}"))?;
 
     let path = mcp_dir.join("scl-config.json");
     let json = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize MCP config: {e}"))?;
-    fs::write(&path, json)
-        .map_err(|e| format!("Failed to write MCP config: {e}"))?;
+    fs::write(&path, json).map_err(|e| format!("Failed to write MCP config: {e}"))?;
 
     Ok(path)
 }
@@ -224,5 +249,7 @@ pub fn save_last_event(desc: &str) {
 
 /// Load the last recorded event description.
 pub fn load_last_event() -> Option<String> {
-    fs::read_to_string(last_event_path()).ok().filter(|s| !s.is_empty())
+    fs::read_to_string(last_event_path())
+        .ok()
+        .filter(|s| !s.is_empty())
 }

@@ -10,8 +10,7 @@ fn workspaces_dir() -> PathBuf {
 pub fn register(path: Option<&str>) -> Result<(), String> {
     xdg::ensure_dirs()?;
     let ws_dir = workspaces_dir();
-    fs::create_dir_all(&ws_dir)
-        .map_err(|e| format!("Failed to create workspaces dir: {e}"))?;
+    fs::create_dir_all(&ws_dir).map_err(|e| format!("Failed to create workspaces dir: {e}"))?;
 
     let abs_path = match path {
         Some(p) if p != "." => {
@@ -23,15 +22,16 @@ pub fn register(path: Option<&str>) -> Result<(), String> {
                     .join(p)
             }
         }
-        _ => std::env::current_dir()
-            .map_err(|e| format!("Failed to get current dir: {e}"))?,
+        _ => std::env::current_dir().map_err(|e| format!("Failed to get current dir: {e}"))?,
     };
 
-    let canon = abs_path.canonicalize()
+    let canon = abs_path
+        .canonicalize()
         .map_err(|e| format!("Path does not exist: {}: {e}", abs_path.display()))?;
 
     // Derive a friendly name from the directory
-    let name = canon.file_name()
+    let name = canon
+        .file_name()
         .map(|f| f.to_string_lossy().to_string())
         .unwrap_or_else(|| "workspace".to_string());
 
@@ -74,14 +74,19 @@ pub fn list() -> Result<(), String> {
 
     println!("Registered workspaces ({}):", entries.len());
     for entry in &entries {
-        let name = entry.path()
+        let name = entry
+            .path()
             .file_stem()
             .map(|f| f.to_string_lossy().to_string())
             .unwrap_or_default();
         let path = fs::read_to_string(entry.path()).unwrap_or_default();
         let path = path.trim();
         let has_harness = Path::new(path).join(".harness").exists();
-        let status = if has_harness { "active" } else { "no .harness/" };
+        let status = if has_harness {
+            "active"
+        } else {
+            "no .harness/"
+        };
         println!("  {name}: {path} [{status}]");
     }
     Ok(())
@@ -92,11 +97,12 @@ pub fn remove(name: &str) -> Result<(), String> {
     let ws_file = workspaces_dir().join(format!("{name}.path"));
 
     if !ws_file.exists() {
-        return Err(format!("Workspace '{name}' not found. Use `harness workspace list` to see registered workspaces."));
+        return Err(format!(
+            "Workspace '{name}' not found. Use `harness workspace list` to see registered workspaces."
+        ));
     }
 
-    fs::remove_file(&ws_file)
-        .map_err(|e| format!("Failed to remove workspace: {e}"))?;
+    fs::remove_file(&ws_file).map_err(|e| format!("Failed to remove workspace: {e}"))?;
 
     println!("Removed workspace: {name}");
     Ok(())

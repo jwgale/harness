@@ -109,7 +109,6 @@ auto_record = true
 # progress_buffer_size = 50         # max lines in progress buffer for Telegram updates
 "#;
 
-    fs::write(&path, default)
-        .map_err(|e| format!("Failed to write default config: {e}"))?;
+    fs::write(&path, default).map_err(|e| format!("Failed to write default config: {e}"))?;
     Ok(())
 }

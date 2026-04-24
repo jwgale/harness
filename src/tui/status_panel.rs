@@ -1,11 +1,11 @@
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::Frame;
 
-use super::spec_parser::{Feature, FeatureStatus};
 use super::TuiPhase;
+use super::spec_parser::{Feature, FeatureStatus};
 
 /// Agent legend info for multi-agent TUI display.
 pub struct AgentLegend {
@@ -16,7 +16,10 @@ pub struct AgentLegend {
 impl AgentLegend {
     #[allow(dead_code)]
     pub fn empty() -> Self {
-        Self { agents: Vec::new(), filter: "All".to_string() }
+        Self {
+            agents: Vec::new(),
+            filter: "All".to_string(),
+        }
     }
 }
 
@@ -98,13 +101,20 @@ pub fn render(
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled("  Project: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(project_name, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            project_name,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
     ]));
     lines.push(Line::from(vec![
         Span::styled("  Phase:   ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             format!("{} (round {}/{})", phase.label(), round, max_rounds),
-            Style::default().fg(phase.color()).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(phase.color())
+                .add_modifier(Modifier::BOLD),
         ),
     ]));
     lines.push(Line::from(vec![
@@ -113,7 +123,10 @@ pub fn render(
     ]));
     lines.push(Line::from(vec![
         Span::styled("  Elapsed: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(format_elapsed(elapsed_secs), Style::default().fg(Color::White)),
+        Span::styled(
+            format_elapsed(elapsed_secs),
+            Style::default().fg(Color::White),
+        ),
     ]));
 
     // Multi-agent info
@@ -122,7 +135,9 @@ pub fn render(
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "  ── Parallel Agents ──",
-                Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
             )));
             for name in names {
                 lines.push(Line::from(vec![
@@ -138,7 +153,9 @@ pub fn render(
                 Span::styled("  Loop:    ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     format!("iteration {lr}/{lm}"),
-                    Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::LightYellow)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]));
         }
@@ -148,7 +165,9 @@ pub fn render(
                 Span::styled("  Agent:   ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     format!("{name} [{role}]"),
-                    Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::LightCyan)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]));
         }
@@ -158,8 +177,12 @@ pub fn render(
     // Agent legend (multi-agent mode)
     if !legend.agents.is_empty() {
         let agent_colors = [
-            Color::LightCyan, Color::LightGreen, Color::LightYellow,
-            Color::LightMagenta, Color::LightBlue, Color::LightRed,
+            Color::LightCyan,
+            Color::LightGreen,
+            Color::LightYellow,
+            Color::LightMagenta,
+            Color::LightBlue,
+            Color::LightRed,
         ];
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -168,7 +191,11 @@ pub fn render(
         )));
         for (i, name) in legend.agents.iter().enumerate() {
             let color = agent_colors[i % agent_colors.len()];
-            let key_hint = if i < 4 { format!(" ({})", i + 4) } else { String::new() };
+            let key_hint = if i < 4 {
+                format!(" ({})", i + 4)
+            } else {
+                String::new()
+            };
             lines.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled("\u{25cf} ", Style::default().fg(color)),
@@ -178,7 +205,12 @@ pub fn render(
         }
         lines.push(Line::from(vec![
             Span::styled("  Filter: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&legend.filter, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                &legend.filter,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("  ` cycle", Style::default().fg(Color::DarkGray)),
         ]));
     }
@@ -239,7 +271,10 @@ pub fn render(
             };
             lines.push(Line::from(vec![
                 Span::styled("  VERDICT: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(v.clone(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    v.clone(),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
             ]));
         }
     }

@@ -22,7 +22,9 @@ pub fn run(action: &str) -> Result<(), String> {
         "stop" => stop(),
         "status" => status(),
         "logs" => logs(),
-        _ => Err(format!("Unknown daemon action: {action}. Use start, stop, status, or logs.")),
+        _ => Err(format!(
+            "Unknown daemon action: {action}. Use start, stop, status, or logs."
+        )),
     }
 }
 
@@ -44,8 +46,7 @@ fn service_file_path() -> PathBuf {
 
 fn write_service_file(binary: &str) -> Result<(), String> {
     let dir = service_dir();
-    fs::create_dir_all(&dir)
-        .map_err(|e| format!("Failed to create systemd user dir: {e}"))?;
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create systemd user dir: {e}"))?;
 
     let data_dir = xdg::data_dir();
     let content = format!(
@@ -130,8 +131,7 @@ fn stop() -> Result<(), String> {
 }
 
 fn status() -> Result<(), String> {
-    let active = systemctl(&["is-active", SERVICE_NAME])
-        .unwrap_or_else(|_| "inactive".to_string());
+    let active = systemctl(&["is-active", SERVICE_NAME]).unwrap_or_else(|_| "inactive".to_string());
     let state = active.trim();
 
     match state {
@@ -158,13 +158,19 @@ fn status() -> Result<(), String> {
             println!();
             println!("Watched workspaces ({}):", workspaces.len());
             for ws in &workspaces {
-                let ws_name = ws.path().file_stem()
+                let ws_name = ws
+                    .path()
+                    .file_stem()
                     .map(|f| f.to_string_lossy().to_string())
                     .unwrap_or_default();
                 if let Ok(path) = fs::read_to_string(ws.path()) {
                     let p = path.trim();
                     let has_harness = Path::new(p).join(".harness").exists();
-                    let tag = if has_harness { "active" } else { "no .harness/" };
+                    let tag = if has_harness {
+                        "active"
+                    } else {
+                        "no .harness/"
+                    };
                     println!("  {ws_name}: {p} [{tag}]");
                 }
             }
@@ -210,12 +216,10 @@ pub fn run_daemon_loop() -> Result<(), String> {
     let data_dir = xdg::data_dir();
     let pid = std::process::id();
     let pid_file = data_dir.join("daemon.pid");
-    fs::write(&pid_file, pid.to_string())
-        .map_err(|e| format!("Failed to write PID file: {e}"))?;
+    fs::write(&pid_file, pid.to_string()).map_err(|e| format!("Failed to write PID file: {e}"))?;
 
     let ws_dir = data_dir.join("workspaces");
-    fs::create_dir_all(&ws_dir)
-        .map_err(|e| format!("Failed to create workspaces dir: {e}"))?;
+    fs::create_dir_all(&ws_dir).map_err(|e| format!("Failed to create workspaces dir: {e}"))?;
 
     let plugins_dir = xdg::plugins_dir();
 
@@ -231,14 +235,17 @@ pub fn run_daemon_loop() -> Result<(), String> {
         if let Ok(event) = res {
             let _ = notify_tx.send(event);
         }
-    }).map_err(|e| format!("Failed to create file watcher: {e}"))?;
+    })
+    .map_err(|e| format!("Failed to create file watcher: {e}"))?;
 
     // Watch the workspaces directory for new registrations
-    watcher.watch(ws_dir.as_ref(), RecursiveMode::NonRecursive)
+    watcher
+        .watch(ws_dir.as_ref(), RecursiveMode::NonRecursive)
         .map_err(|e| format!("Failed to watch workspaces dir: {e}"))?;
 
     // Watch the plugins directory for hot-reload
-    watcher.watch(plugins_dir.as_ref(), RecursiveMode::NonRecursive)
+    watcher
+        .watch(plugins_dir.as_ref(), RecursiveMode::NonRecursive)
         .map_err(|e| format!("Failed to watch plugins dir: {e}"))?;
 
     // Watch all currently registered workspace .harness/ dirs
@@ -253,7 +260,14 @@ pub fn run_daemon_loop() -> Result<(), String> {
     loop {
         match notify_rx.recv_timeout(Duration::from_secs(30)) {
             Ok(event) => {
-                handle_event(&event, &mut pm, &ws_dir, &plugins_dir, &mut watcher, &mut watched_dirs);
+                handle_event(
+                    &event,
+                    &mut pm,
+                    &ws_dir,
+                    &plugins_dir,
+                    &mut watcher,
+                    &mut watched_dirs,
+                );
             }
             Err(std_mpsc::RecvTimeoutError::Timeout) => {
                 // Periodic: refresh watches and check schedules
@@ -285,7 +299,10 @@ fn handle_event(
     watcher: &mut impl Watcher,
     watched_dirs: &mut HashSet<PathBuf>,
 ) {
-    if !matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)) {
+    if !matches!(
+        event.kind,
+        EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+    ) {
         return;
     }
 
@@ -324,24 +341,26 @@ fn handle_event(
                 _ => None,
             };
             if let Some(hook) = hook {
-                let ws_name = path.parent()
+                let ws_name = path
+                    .parent()
                     .and_then(|p| p.parent())
                     .and_then(|p| p.file_name())
                     .map(|f| f.to_string_lossy().to_string())
                     .unwrap_or_else(|| "unknown".to_string());
-                eprintln!("[daemon] {ws_name}: {filename} changed, firing {}", hook.label());
+                eprintln!(
+                    "[daemon] {ws_name}: {filename} changed, firing {}",
+                    hook.label()
+                );
                 pm.fire(hook);
             }
         }
     }
 }
 
-fn refresh_watches(
-    ws_dir: &Path,
-    watcher: &mut impl Watcher,
-    watched_dirs: &mut HashSet<PathBuf>,
-) {
-    let Ok(entries) = fs::read_dir(ws_dir) else { return };
+fn refresh_watches(ws_dir: &Path, watcher: &mut impl Watcher, watched_dirs: &mut HashSet<PathBuf>) {
+    let Ok(entries) = fs::read_dir(ws_dir) else {
+        return;
+    };
 
     // Collect currently registered workspace paths
     let mut current_harness_dirs: HashSet<PathBuf> = HashSet::new();
@@ -351,13 +370,17 @@ fn refresh_watches(
         if !path.is_file() || path.extension().is_none_or(|e| e != "path") {
             continue;
         }
-        let Ok(workspace_path) = fs::read_to_string(&path) else { continue };
+        let Ok(workspace_path) = fs::read_to_string(&path) else {
+            continue;
+        };
         let harness_dir = PathBuf::from(workspace_path.trim()).join(".harness");
 
         if harness_dir.exists() {
             current_harness_dirs.insert(harness_dir.clone());
             if !watched_dirs.contains(&harness_dir)
-                && watcher.watch(harness_dir.as_ref(), RecursiveMode::NonRecursive).is_ok()
+                && watcher
+                    .watch(harness_dir.as_ref(), RecursiveMode::NonRecursive)
+                    .is_ok()
             {
                 eprintln!("[daemon] Now watching: {}", harness_dir.display());
                 watched_dirs.insert(harness_dir);
@@ -366,7 +389,10 @@ fn refresh_watches(
     }
 
     // Unwatch dirs that are no longer registered
-    let stale: Vec<PathBuf> = watched_dirs.difference(&current_harness_dirs).cloned().collect();
+    let stale: Vec<PathBuf> = watched_dirs
+        .difference(&current_harness_dirs)
+        .cloned()
+        .collect();
     for dir in stale {
         let _ = watcher.unwatch(dir.as_ref());
         eprintln!("[daemon] Unwatched (removed): {}", dir.display());

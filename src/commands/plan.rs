@@ -1,7 +1,7 @@
 use crate::artifacts;
 use crate::cli_backend::{self, Backend};
 use crate::config::Config;
-use crate::plugins::{PluginManager, HookPoint};
+use crate::plugins::{HookPoint, PluginManager};
 use crate::prompts;
 use crate::scl_lifecycle;
 
@@ -15,7 +15,12 @@ pub fn run(backend_override: Option<&str>) -> Result<(), String> {
     pm.fire(HookPoint::BeforePlan);
     println!("Running planner...");
     let prompt = prompts::planner_prompt(&goal);
-    let output = cli_backend::run_oneshot(&backend, &config.model, &prompt, config.evaluator_timeout_seconds)?;
+    let output = cli_backend::run_oneshot(
+        &backend,
+        &config.model,
+        &prompt,
+        config.evaluator_timeout_seconds,
+    )?;
 
     artifacts::write_artifact("spec.md", &output)?;
     pm.fire(HookPoint::AfterPlan);

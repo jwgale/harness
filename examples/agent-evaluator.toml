@@ -2,6 +2,6 @@
 # Copy to ~/.config/harness/agents/
 name = "my-evaluator"
 role = "evaluator"
-backend = "claude"
+backend = "codex"
 description = "Skeptical QA evaluator"
 timeout_seconds = 600

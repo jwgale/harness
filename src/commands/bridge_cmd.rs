@@ -29,8 +29,7 @@ fn harness_binary_path() -> Result<String, String> {
 
 fn write_service_file(binary: &str) -> Result<(), String> {
     let dir = service_dir();
-    fs::create_dir_all(&dir)
-        .map_err(|e| format!("Failed to create systemd user dir: {e}"))?;
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create systemd user dir: {e}"))?;
 
     let data_dir = xdg::data_dir();
     let content = format!(
@@ -124,14 +123,15 @@ pub fn stop() -> Result<(), String> {
 
 /// `harness bridge telegram status`
 pub fn status() -> Result<(), String> {
-    let active = systemctl(&["is-active", SERVICE_NAME])
-        .unwrap_or_else(|_| "inactive".to_string());
+    let active = systemctl(&["is-active", SERVICE_NAME]).unwrap_or_else(|_| "inactive".to_string());
     let state = active.trim();
 
     match state {
         "active" => println!("Telegram bridge is running."),
         "activating" => println!("Telegram bridge is starting..."),
-        "failed" => println!("Telegram bridge has failed. Check logs: journalctl --user -u {SERVICE_NAME} -n 50"),
+        "failed" => println!(
+            "Telegram bridge has failed. Check logs: journalctl --user -u {SERVICE_NAME} -n 50"
+        ),
         _ => println!("Telegram bridge is not running."),
     }
 

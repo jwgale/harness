@@ -45,7 +45,12 @@ pub fn run_strategy(config: &Config, backend: &Backend) -> Result<String, String
 /// Default strategy: prompt-based evaluation through the CLI backend.
 fn run_default(config: &Config, backend: &Backend) -> Result<String, String> {
     let prompt = prompts::evaluator_prompt()?;
-    cli_backend::run_oneshot(backend, &config.model, &prompt, config.evaluator_timeout_seconds)
+    cli_backend::run_oneshot(
+        backend,
+        &config.model,
+        &prompt,
+        config.evaluator_timeout_seconds,
+    )
 }
 
 /// Playwright MCP strategy: runs the default evaluator but prepends instructions to use
@@ -70,7 +75,12 @@ After browser testing, continue with the standard evaluation below.
 
 "#;
     let prompt = format!("{playwright_prefix}{base_prompt}");
-    cli_backend::run_oneshot(backend, &config.model, &prompt, config.evaluator_timeout_seconds)
+    cli_backend::run_oneshot(
+        backend,
+        &config.model,
+        &prompt,
+        config.evaluator_timeout_seconds,
+    )
 }
 
 /// Curl strategy: checks HTTP endpoints defined in .harness/endpoints.json or spec.md,
@@ -81,19 +91,27 @@ fn run_curl(config: &Config, backend: &Backend) -> Result<String, String> {
 
     if endpoints.is_empty() {
         health_report.push_str("No endpoints configured. Create `.harness/endpoints.json` with an array of URLs, e.g.:\n");
-        health_report.push_str("```json\n[\"http://localhost:3000\", \"http://localhost:3000/api/health\"]\n```\n\n");
+        health_report.push_str(
+            "```json\n[\"http://localhost:3000\", \"http://localhost:3000/api/health\"]\n```\n\n",
+        );
         health_report.push_str("Falling back to prompt-based evaluation.\n\n---\n\n");
     } else {
         for endpoint in &endpoints {
             let result = curl_check(endpoint);
             health_report.push_str(&format!("- `{endpoint}`: {result}\n"));
         }
-        health_report.push_str("\nUse these results when scoring functionality and robustness.\n\n---\n\n");
+        health_report
+            .push_str("\nUse these results when scoring functionality and robustness.\n\n---\n\n");
     }
 
     let base_prompt = prompts::evaluator_prompt()?;
     let prompt = format!("{health_report}{base_prompt}");
-    cli_backend::run_oneshot(backend, &config.model, &prompt, config.evaluator_timeout_seconds)
+    cli_backend::run_oneshot(
+        backend,
+        &config.model,
+        &prompt,
+        config.evaluator_timeout_seconds,
+    )
 }
 
 /// Load endpoints from .harness/endpoints.json (array of URL strings).
@@ -113,10 +131,15 @@ fn load_endpoints() -> Vec<String> {
 fn curl_check(url: &str) -> String {
     let output = Command::new("curl")
         .args([
-            "-s", "-o", "/dev/null",
-            "-w", "%{http_code}",
-            "--max-time", "5",
-            "--connect-timeout", "3",
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "--max-time",
+            "5",
+            "--connect-timeout",
+            "3",
             url,
         ])
         .output();
@@ -172,7 +195,9 @@ After browser testing, continue with the standard evaluation below.
                     let result = curl_check(endpoint);
                     report.push_str(&format!("- `{endpoint}`: {result}\n"));
                 }
-                report.push_str("\nUse these results when scoring functionality and robustness.\n\n---\n\n");
+                report.push_str(
+                    "\nUse these results when scoring functionality and robustness.\n\n---\n\n",
+                );
             }
             Ok(Some(report))
         }

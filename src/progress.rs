@@ -19,7 +19,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 
 /// Environment variable name for the progress socket path.
@@ -327,10 +327,8 @@ mod tests {
 
     #[test]
     fn test_socket_roundtrip() {
-        let tmp = std::env::temp_dir().join(format!(
-            "harness-progress-test-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("harness-progress-test-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
 
         let (handle, rx) = create_listener(&tmp).unwrap();
@@ -369,10 +367,8 @@ mod tests {
 
     #[test]
     fn test_multiple_clients() {
-        let tmp = std::env::temp_dir().join(format!(
-            "harness-progress-multi-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("harness-progress-multi-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
 
         let (handle, rx) = create_listener(&tmp).unwrap();
@@ -401,10 +397,8 @@ mod tests {
 
     #[test]
     fn test_shutdown_cleans_socket() {
-        let tmp = std::env::temp_dir().join(format!(
-            "harness-progress-shutdown-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("harness-progress-shutdown-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
 
         let (handle, _rx) = create_listener(&tmp).unwrap();

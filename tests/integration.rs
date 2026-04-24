@@ -168,7 +168,11 @@ fn test_hook_execution() {
     let _ = run_harness_in(&tmp, &["plan", "--backend", "mock"]);
 
     // Check the marker file was created
-    assert!(marker.exists(), "Hook did not fire — marker file not created at {}", marker.display());
+    assert!(
+        marker.exists(),
+        "Hook did not fire — marker file not created at {}",
+        marker.display()
+    );
 
     // Cleanup
     fs::remove_file(&plugin_file).ok();
@@ -300,6 +304,31 @@ fn test_mock_evaluate_with_strategy() {
 }
 
 #[test]
+fn test_run_metadata_updates_latest_run_file() {
+    let tmp = tempdir("runmeta");
+    run_harness_in(&tmp, &["init", "Run metadata test"]);
+
+    let (stdout, stderr, ok) = run_harness_in(
+        &tmp,
+        &["run", "--backend", "mock", "--no-tui", "--max-rounds", "1"],
+    );
+    assert!(ok, "first run failed: {stdout} {stderr}");
+
+    let (stdout, stderr, ok) = run_harness_in(
+        &tmp,
+        &["run", "--backend", "mock", "--no-tui", "--max-rounds", "1"],
+    );
+    assert!(ok, "second run failed: {stdout} {stderr}");
+
+    let run_002 = fs::read_to_string(tmp.join(".harness/runs/run-002.json")).unwrap();
+    let meta: serde_json::Value = serde_json::from_str(&run_002).unwrap();
+    assert_eq!(meta["outcome"].as_str(), Some("Pass"));
+    assert!(meta["ended_at"].as_str().is_some());
+
+    fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
 fn test_notification_plugin_discovery() {
     let plugins_dir = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp/.config"))
@@ -321,7 +350,10 @@ events = ["on_eval_pass"]
 
     // Plugin list should still work (notifications are separate from hooks)
     let (stdout, _, ok) = run_harness(&["plugin", "list"]);
-    assert!(ok, "plugin list failed after adding notification plugin: {stdout}");
+    assert!(
+        ok,
+        "plugin list failed after adding notification plugin: {stdout}"
+    );
 
     // Cleanup
     fs::remove_file(&plugin_file).ok();
@@ -343,10 +375,15 @@ fn test_agent_add_remove() {
 
     // Add
     let (stdout, _, ok) = run_harness(&[
-        "agent", "add", "test-planner",
-        "--role", "planner",
-        "--backend", "mock",
-        "--description", "Integration test planner",
+        "agent",
+        "add",
+        "test-planner",
+        "--role",
+        "planner",
+        "--backend",
+        "mock",
+        "--description",
+        "Integration test planner",
     ]);
     assert!(ok, "agent add failed: {stdout}");
     assert!(stdout.contains("test-planner"));
@@ -368,9 +405,13 @@ fn test_agent_add_remove() {
 #[test]
 fn test_agent_add_invalid_role() {
     let (_, stderr, ok) = run_harness(&[
-        "agent", "add", "bad-agent",
-        "--role", "wizard",
-        "--backend", "claude",
+        "agent",
+        "add",
+        "bad-agent",
+        "--role",
+        "wizard",
+        "--backend",
+        "claude",
     ]);
     assert!(!ok);
     assert!(stderr.contains("Invalid role"));
@@ -387,28 +428,46 @@ fn test_multi_agent_run_with_mock() {
     fs::create_dir_all(&agents_dir).unwrap();
 
     // Create test agents
-    fs::write(agents_dir.join("ma-planner.toml"), r#"
+    fs::write(
+        agents_dir.join("ma-planner.toml"),
+        r#"
 name = "ma-planner"
 role = "planner"
 backend = "mock"
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
-    fs::write(agents_dir.join("ma-builder.toml"), r#"
+    fs::write(
+        agents_dir.join("ma-builder.toml"),
+        r#"
 name = "ma-builder"
 role = "builder"
 backend = "mock"
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
-    fs::write(agents_dir.join("ma-evaluator.toml"), r#"
+    fs::write(
+        agents_dir.join("ma-evaluator.toml"),
+        r#"
 name = "ma-evaluator"
 role = "evaluator"
 backend = "mock"
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     // Run with --agents
-    let (stdout, _, ok) = run_harness_in(&tmp, &[
-        "run", "--agents", "ma-planner,ma-builder,ma-evaluator", "--no-tui",
-    ]);
+    let (stdout, _, ok) = run_harness_in(
+        &tmp,
+        &[
+            "run",
+            "--agents",
+            "ma-planner,ma-builder,ma-evaluator",
+            "--no-tui",
+        ],
+    );
     assert!(ok, "multi-agent run failed: {stdout}");
     assert!(stdout.contains("Multi-agent run"));
     assert!(stdout.contains("ma-planner"));
@@ -439,20 +498,30 @@ fn test_workflow_run_with_mock() {
     fs::create_dir_all(&workflows_dir).unwrap();
 
     // Create agents
-    fs::write(agents_dir.join("wf-planner.toml"), r#"
+    fs::write(
+        agents_dir.join("wf-planner.toml"),
+        r#"
 name = "wf-planner"
 role = "planner"
 backend = "mock"
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
-    fs::write(agents_dir.join("wf-builder.toml"), r#"
+    fs::write(
+        agents_dir.join("wf-builder.toml"),
+        r#"
 name = "wf-builder"
 role = "builder"
 backend = "mock"
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     // Create workflow
-    fs::write(workflows_dir.join("test-flow.toml"), r#"
+    fs::write(
+        workflows_dir.join("test-flow.toml"),
+        r#"
 name = "test-flow"
 description = "Test workflow"
 max_rounds = 1
@@ -462,12 +531,13 @@ agent = "wf-planner"
 
 [[steps]]
 agent = "wf-builder"
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     // Run with --workflow
-    let (stdout, stderr, ok) = run_harness_in(&tmp, &[
-        "run", "--workflow", "test-flow", "--no-tui",
-    ]);
+    let (stdout, stderr, ok) =
+        run_harness_in(&tmp, &["run", "--workflow", "test-flow", "--no-tui"]);
     assert!(ok, "workflow run failed: stdout={stdout} stderr={stderr}");
     assert!(stdout.contains("Running workflow 'test-flow'"));
     assert!(stdout.contains("Workflow 'test-flow' completed"));
@@ -489,13 +559,22 @@ fn test_parallel_agents_with_mock() {
         .join("harness/agents");
     fs::create_dir_all(&agents_dir).unwrap();
 
-    fs::write(agents_dir.join("par-a.toml"), "name = \"par-a\"\nrole = \"custom\"\nbackend = \"mock\"\n").unwrap();
-    fs::write(agents_dir.join("par-b.toml"), "name = \"par-b\"\nrole = \"custom\"\nbackend = \"mock\"\n").unwrap();
+    fs::write(
+        agents_dir.join("par-a.toml"),
+        "name = \"par-a\"\nrole = \"custom\"\nbackend = \"mock\"\n",
+    )
+    .unwrap();
+    fs::write(
+        agents_dir.join("par-b.toml"),
+        "name = \"par-b\"\nrole = \"custom\"\nbackend = \"mock\"\n",
+    )
+    .unwrap();
 
     // Run with --parallel
-    let (stdout, _stderr, ok) = run_harness_in(&tmp, &[
-        "run", "--agents", "par-a,par-b", "--parallel", "--no-tui",
-    ]);
+    let (stdout, _stderr, ok) = run_harness_in(
+        &tmp,
+        &["run", "--agents", "par-a,par-b", "--parallel", "--no-tui"],
+    );
     assert!(ok, "parallel run failed: {stdout}");
     assert!(stdout.contains("parallel"));
 
@@ -520,28 +599,44 @@ fn test_workflow_validate() {
     fs::create_dir_all(&workflows_dir).unwrap();
 
     // Create agents
-    fs::write(agents_dir.join("val-planner.toml"), "name = \"val-planner\"\nrole = \"planner\"\nbackend = \"mock\"\n").unwrap();
-    fs::write(agents_dir.join("val-builder.toml"), "name = \"val-builder\"\nrole = \"builder\"\nbackend = \"mock\"\n").unwrap();
+    fs::write(
+        agents_dir.join("val-planner.toml"),
+        "name = \"val-planner\"\nrole = \"planner\"\nbackend = \"mock\"\n",
+    )
+    .unwrap();
+    fs::write(
+        agents_dir.join("val-builder.toml"),
+        "name = \"val-builder\"\nrole = \"builder\"\nbackend = \"mock\"\n",
+    )
+    .unwrap();
 
     // Create valid workflow
-    fs::write(workflows_dir.join("valid-wf.toml"), r#"
+    fs::write(
+        workflows_dir.join("valid-wf.toml"),
+        r#"
 name = "valid-wf"
 [[steps]]
 agent = "val-planner"
 [[steps]]
 agent = "val-builder"
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     let (stdout, _, ok) = run_harness(&["workflow", "validate", "valid-wf"]);
     assert!(ok, "validate failed: {stdout}");
     assert!(stdout.contains("valid"));
 
     // Create invalid workflow (references non-existent agent)
-    fs::write(workflows_dir.join("invalid-wf.toml"), r#"
+    fs::write(
+        workflows_dir.join("invalid-wf.toml"),
+        r#"
 name = "invalid-wf"
 [[steps]]
 agent = "nonexistent-agent"
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     let (_, stderr, ok) = run_harness(&["workflow", "validate", "invalid-wf"]);
     assert!(!ok, "invalid workflow should fail validation");
@@ -575,12 +670,26 @@ fn test_iterative_loop_workflow() {
     fs::create_dir_all(&agents_dir).unwrap();
     fs::create_dir_all(&workflows_dir).unwrap();
 
-    fs::write(agents_dir.join("loop-planner.toml"), "name = \"loop-planner\"\nrole = \"planner\"\nbackend = \"mock\"\n").unwrap();
-    fs::write(agents_dir.join("loop-builder.toml"), "name = \"loop-builder\"\nrole = \"builder\"\nbackend = \"mock\"\n").unwrap();
-    fs::write(agents_dir.join("loop-evaluator.toml"), "name = \"loop-evaluator\"\nrole = \"evaluator\"\nbackend = \"mock\"\n").unwrap();
+    fs::write(
+        agents_dir.join("loop-planner.toml"),
+        "name = \"loop-planner\"\nrole = \"planner\"\nbackend = \"mock\"\n",
+    )
+    .unwrap();
+    fs::write(
+        agents_dir.join("loop-builder.toml"),
+        "name = \"loop-builder\"\nrole = \"builder\"\nbackend = \"mock\"\n",
+    )
+    .unwrap();
+    fs::write(
+        agents_dir.join("loop-evaluator.toml"),
+        "name = \"loop-evaluator\"\nrole = \"evaluator\"\nbackend = \"mock\"\n",
+    )
+    .unwrap();
 
     // Workflow with loop_until
-    fs::write(workflows_dir.join("iter-flow.toml"), r#"
+    fs::write(
+        workflows_dir.join("iter-flow.toml"),
+        r#"
 name = "iter-flow"
 max_rounds = 2
 
@@ -593,11 +702,12 @@ loop_until = "pass"
 
 [[steps]]
 agent = "loop-evaluator"
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
-    let (stdout, _stderr, ok) = run_harness_in(&tmp, &[
-        "run", "--workflow", "iter-flow", "--no-tui",
-    ]);
+    let (stdout, _stderr, ok) =
+        run_harness_in(&tmp, &["run", "--workflow", "iter-flow", "--no-tui"]);
     assert!(ok, "iterative workflow failed: {stdout}");
     // Mock backend returns PASS, so loop should complete on first iteration
     assert!(stdout.contains("Loop completed: PASS"));
@@ -620,15 +730,28 @@ fn test_parallel_artifact_isolation() {
     fs::create_dir_all(&agents_dir).unwrap();
 
     // Two builders running in parallel — should get isolated artifacts
-    fs::write(agents_dir.join("iso-a.toml"), "name = \"iso-a\"\nrole = \"builder\"\nbackend = \"mock\"\n").unwrap();
-    fs::write(agents_dir.join("iso-b.toml"), "name = \"iso-b\"\nrole = \"builder\"\nbackend = \"mock\"\n").unwrap();
+    fs::write(
+        agents_dir.join("iso-a.toml"),
+        "name = \"iso-a\"\nrole = \"builder\"\nbackend = \"mock\"\n",
+    )
+    .unwrap();
+    fs::write(
+        agents_dir.join("iso-b.toml"),
+        "name = \"iso-b\"\nrole = \"builder\"\nbackend = \"mock\"\n",
+    )
+    .unwrap();
 
     // Create a spec.md so builders have something to work with
-    fs::write(tmp.join(".harness/spec.md"), "# Test Spec\nBuild something.").unwrap();
+    fs::write(
+        tmp.join(".harness/spec.md"),
+        "# Test Spec\nBuild something.",
+    )
+    .unwrap();
 
-    let (stdout, stderr, ok) = run_harness_in(&tmp, &[
-        "run", "--agents", "iso-a,iso-b", "--parallel", "--no-tui",
-    ]);
+    let (stdout, stderr, ok) = run_harness_in(
+        &tmp,
+        &["run", "--agents", "iso-a,iso-b", "--parallel", "--no-tui"],
+    );
     assert!(ok, "parallel isolation run failed: {stdout} {stderr}");
 
     // Each builder should have its own isolated status.md
@@ -660,11 +783,21 @@ fn test_parallel_output_artifact_override() {
     fs::create_dir_all(&agents_dir).unwrap();
     fs::create_dir_all(&workflows_dir).unwrap();
 
-    fs::write(agents_dir.join("ov-a.toml"), "name = \"ov-a\"\nrole = \"custom\"\nbackend = \"mock\"\n").unwrap();
-    fs::write(agents_dir.join("ov-b.toml"), "name = \"ov-b\"\nrole = \"custom\"\nbackend = \"mock\"\n").unwrap();
+    fs::write(
+        agents_dir.join("ov-a.toml"),
+        "name = \"ov-a\"\nrole = \"custom\"\nbackend = \"mock\"\n",
+    )
+    .unwrap();
+    fs::write(
+        agents_dir.join("ov-b.toml"),
+        "name = \"ov-b\"\nrole = \"custom\"\nbackend = \"mock\"\n",
+    )
+    .unwrap();
 
     // Workflow with output_artifact overrides in parallel steps
-    fs::write(workflows_dir.join("override-wf.toml"), r#"
+    fs::write(
+        workflows_dir.join("override-wf.toml"),
+        r#"
 name = "override-wf"
 
 [[steps]]
@@ -676,16 +809,23 @@ output_artifact = "custom-a.md"
 agent = "ov-b"
 parallel = true
 output_artifact = "custom-b.md"
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
-    let (stdout, stderr, ok) = run_harness_in(&tmp, &[
-        "run", "--workflow", "override-wf", "--no-tui",
-    ]);
+    let (stdout, stderr, ok) =
+        run_harness_in(&tmp, &["run", "--workflow", "override-wf", "--no-tui"]);
     assert!(ok, "override workflow failed: {stdout} {stderr}");
 
     // Custom artifacts should exist
-    assert!(tmp.join(".harness/custom-a.md").exists(), "custom-a.md not found");
-    assert!(tmp.join(".harness/custom-b.md").exists(), "custom-b.md not found");
+    assert!(
+        tmp.join(".harness/custom-a.md").exists(),
+        "custom-a.md not found"
+    );
+    assert!(
+        tmp.join(".harness/custom-b.md").exists(),
+        "custom-b.md not found"
+    );
 
     fs::remove_file(agents_dir.join("ov-a.toml")).ok();
     fs::remove_file(agents_dir.join("ov-b.toml")).ok();
@@ -731,8 +871,10 @@ fn test_bridge_telegram_help() {
         .output()
         .expect("Failed to run harness");
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    assert!(stdout.contains("start") && stdout.contains("stop") && stdout.contains("status"),
-        "bridge telegram help should list start/stop/status: {stdout}");
+    assert!(
+        stdout.contains("start") && stdout.contains("stop") && stdout.contains("status"),
+        "bridge telegram help should list start/stop/status: {stdout}"
+    );
 }
 
 #[test]
@@ -752,21 +894,35 @@ fn test_workflow_progress_socket() {
     fs::create_dir_all(&agents_dir).unwrap();
     fs::create_dir_all(&workflows_dir).unwrap();
 
-    fs::write(agents_dir.join("prog-planner.toml"), "name = \"prog-planner\"\nrole = \"planner\"\nbackend = \"mock\"\n").unwrap();
-    fs::write(agents_dir.join("prog-builder.toml"), "name = \"prog-builder\"\nrole = \"builder\"\nbackend = \"mock\"\n").unwrap();
-    fs::write(workflows_dir.join("prog-flow.toml"), r#"
+    fs::write(
+        agents_dir.join("prog-planner.toml"),
+        "name = \"prog-planner\"\nrole = \"planner\"\nbackend = \"mock\"\n",
+    )
+    .unwrap();
+    fs::write(
+        agents_dir.join("prog-builder.toml"),
+        "name = \"prog-builder\"\nrole = \"builder\"\nbackend = \"mock\"\n",
+    )
+    .unwrap();
+    fs::write(
+        workflows_dir.join("prog-flow.toml"),
+        r#"
 name = "prog-flow"
 [[steps]]
 agent = "prog-planner"
 [[steps]]
 agent = "prog-builder"
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     // Run without socket — should complete cleanly (no progress.log written)
-    let (stdout, stderr, ok) = run_harness_in(&tmp, &[
-        "run", "--workflow", "prog-flow", "--no-tui",
-    ]);
-    assert!(ok, "workflow should succeed without socket: {stdout} {stderr}");
+    let (stdout, stderr, ok) =
+        run_harness_in(&tmp, &["run", "--workflow", "prog-flow", "--no-tui"]);
+    assert!(
+        ok,
+        "workflow should succeed without socket: {stdout} {stderr}"
+    );
 
     // Verify artifacts were written (proof workflow ran)
     assert!(tmp.join(".harness/spec.md").exists());
@@ -779,7 +935,10 @@ agent = "prog-builder"
         .env("HARNESS_PROGRESS_SOCK", "/tmp/nonexistent-harness-sock")
         .output()
         .expect("Failed to run harness");
-    assert!(output.status.success(), "workflow should succeed with bogus socket path");
+    assert!(
+        output.status.success(),
+        "workflow should succeed with bogus socket path"
+    );
 
     fs::remove_file(agents_dir.join("prog-planner.toml")).ok();
     fs::remove_file(agents_dir.join("prog-builder.toml")).ok();

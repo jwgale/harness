@@ -1,11 +1,11 @@
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::Frame;
-use syntect::highlighting::{ThemeSet, Style as SyntectStyle};
-use syntect::parsing::SyntaxSet;
 use syntect::easy::HighlightLines;
+use syntect::highlighting::{Style as SyntectStyle, ThemeSet};
+use syntect::parsing::SyntaxSet;
 
 /// An output line tagged with an optional agent source.
 struct TaggedLine {
@@ -47,7 +47,10 @@ impl OutputPanel {
 
     /// Push a line with no agent tag.
     pub fn push_line(&mut self, line: String) {
-        self.lines.push(TaggedLine { agent: None, text: line });
+        self.lines.push(TaggedLine {
+            agent: None,
+            text: line,
+        });
         if self.follow_mode {
             self.scroll_offset = usize::MAX;
         }
@@ -104,9 +107,11 @@ impl OutputPanel {
     fn current_filter_label(&self) -> String {
         match &self.filter {
             ViewFilter::All => "All".to_string(),
-            ViewFilter::Agent(i) => {
-                self.known_agents.get(*i).cloned().unwrap_or_else(|| "?".to_string())
-            }
+            ViewFilter::Agent(i) => self
+                .known_agents
+                .get(*i)
+                .cloned()
+                .unwrap_or_else(|| "?".to_string()),
         }
     }
 
@@ -119,7 +124,8 @@ impl OutputPanel {
                     Some(n) => n.as_str(),
                     None => return self.lines.len(),
                 };
-                self.lines.iter()
+                self.lines
+                    .iter()
                     .filter(|l| l.agent.as_deref() == Some(name) || l.agent.is_none())
                     .count()
             }
@@ -135,7 +141,8 @@ impl OutputPanel {
                     Some(n) => n.as_str(),
                     None => return self.lines.iter().collect(),
                 };
-                self.lines.iter()
+                self.lines
+                    .iter()
                     .filter(|l| l.agent.as_deref() == Some(name) || l.agent.is_none())
                     .collect()
             }
@@ -195,25 +202,28 @@ impl OutputPanel {
         let multi_agent = self.known_agents.len() > 1;
         let agents_snapshot = self.known_agents.clone();
 
-        let styled_lines: Vec<Line> = visible.iter().map(|tl| {
-            if multi_agent {
-                if let Some(ref agent) = tl.agent {
-                    let color = agent_color(agent, &agents_snapshot);
-                    let tag = Span::styled(
-                        format!("[{agent}] "),
-                        Style::default().fg(color).add_modifier(Modifier::BOLD),
-                    );
-                    let rest = self.highlight_line(&tl.text);
-                    let mut spans = vec![tag];
-                    spans.extend(rest.spans);
-                    Line::from(spans)
+        let styled_lines: Vec<Line> = visible
+            .iter()
+            .map(|tl| {
+                if multi_agent {
+                    if let Some(ref agent) = tl.agent {
+                        let color = agent_color(agent, &agents_snapshot);
+                        let tag = Span::styled(
+                            format!("[{agent}] "),
+                            Style::default().fg(color).add_modifier(Modifier::BOLD),
+                        );
+                        let rest = self.highlight_line(&tl.text);
+                        let mut spans = vec![tag];
+                        spans.extend(rest.spans);
+                        Line::from(spans)
+                    } else {
+                        self.highlight_line(&tl.text)
+                    }
                 } else {
                     self.highlight_line(&tl.text)
                 }
-            } else {
-                self.highlight_line(&tl.text)
-            }
-        }).collect();
+            })
+            .collect();
 
         let follow_indicator = if self.follow_mode { "FOLLOW" } else { "SCROLL" };
         let filter_label = self.current_filter_label();
@@ -255,14 +265,19 @@ impl OutputPanel {
             ));
         }
 
-        if (line.contains('/') || line.contains('\\')) && line.contains('.') && !line.contains(' ') {
+        if (line.contains('/') || line.contains('\\')) && line.contains('.') && !line.contains(' ')
+        {
             return Line::from(Span::styled(
                 line.to_string(),
                 Style::default().fg(Color::Cyan),
             ));
         }
 
-        if line.starts_with("commit ") || line.starts_with("diff ") || line.starts_with("+++") || line.starts_with("---") {
+        if line.starts_with("commit ")
+            || line.starts_with("diff ")
+            || line.starts_with("+++")
+            || line.starts_with("---")
+        {
             return Line::from(Span::styled(
                 line.to_string(),
                 Style::default().fg(Color::Magenta),
@@ -283,17 +298,17 @@ impl OutputPanel {
 
     fn syntect_highlight<'a>(&self, line: &str) -> Option<Line<'a>> {
         let theme = &self.theme_set.themes["base16-ocean.dark"];
-        let syntax = self.syntax_set.find_syntax_by_extension("rs")
+        let syntax = self
+            .syntax_set
+            .find_syntax_by_extension("rs")
             .or_else(|| Some(self.syntax_set.find_syntax_plain_text()))?;
         let mut h = HighlightLines::new(syntax, theme);
         let ranges = h.highlight_line(line, &self.syntax_set).ok()?;
 
-        let spans: Vec<Span> = ranges.into_iter().map(|(style, text)| {
-            Span::styled(
-                text.to_string(),
-                syntect_to_ratatui_style(style),
-            )
-        }).collect();
+        let spans: Vec<Span> = ranges
+            .into_iter()
+            .map(|(style, text)| Span::styled(text.to_string(), syntect_to_ratatui_style(style)))
+            .collect();
 
         Some(Line::from(spans))
     }
@@ -302,8 +317,12 @@ impl OutputPanel {
 /// Assign a consistent color to an agent name.
 fn agent_color(name: &str, agents: &[String]) -> Color {
     let colors = [
-        Color::LightCyan, Color::LightGreen, Color::LightYellow,
-        Color::LightMagenta, Color::LightBlue, Color::LightRed,
+        Color::LightCyan,
+        Color::LightGreen,
+        Color::LightYellow,
+        Color::LightMagenta,
+        Color::LightBlue,
+        Color::LightRed,
     ];
     let idx = agents.iter().position(|a| a == name).unwrap_or(0);
     colors[idx % colors.len()]

@@ -33,14 +33,19 @@ pub fn builder_prompt() -> Result<String, String> {
     if feedback_num > 1 {
         let latest = format!("feedback/round-{:03}.md", feedback_num - 1);
         if let Ok(feedback) = artifacts::read_artifact(&latest) {
-            prompt.push_str(&format!("\n---\n\n## Evaluator Feedback (Round {})\n\n{feedback}\n", feedback_num - 1));
+            prompt.push_str(&format!(
+                "\n---\n\n## Evaluator Feedback (Round {})\n\n{feedback}\n",
+                feedback_num - 1
+            ));
         }
     }
 
     // Include project file listing for context
     let files = artifacts::list_project_files();
     if !files.is_empty() {
-        prompt.push_str(&format!("\n---\n\n## Current Project Files\n\n```\n{files}\n```\n"));
+        prompt.push_str(&format!(
+            "\n---\n\n## Current Project Files\n\n```\n{files}\n```\n"
+        ));
     }
 
     Ok(prompt)
@@ -60,7 +65,9 @@ pub fn evaluator_prompt() -> Result<String, String> {
 
     let files = artifacts::list_project_files();
     if !files.is_empty() {
-        prompt.push_str(&format!("\n---\n\n## Current Project Files\n\n```\n{files}\n```\n"));
+        prompt.push_str(&format!(
+            "\n---\n\n## Current Project Files\n\n```\n{files}\n```\n"
+        ));
     }
 
     Ok(prompt)

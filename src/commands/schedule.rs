@@ -43,7 +43,9 @@ command = "{command}"
 
     let plugin_path = xdg::plugins_dir().join(format!("schedule-{name}.toml"));
     if plugin_path.exists() {
-        return Err(format!("Schedule '{name}' already exists. Remove it first with `harness schedule remove {name}`."));
+        return Err(format!(
+            "Schedule '{name}' already exists. Remove it first with `harness schedule remove {name}`."
+        ));
     }
 
     fs::write(&plugin_path, plugin_content)
@@ -74,7 +76,8 @@ pub fn list() -> Result<(), String> {
     let mut found = false;
     for entry in entries.flatten() {
         let path = entry.path();
-        let fname = path.file_name()
+        let fname = path
+            .file_name()
             .map(|f| f.to_string_lossy().to_string())
             .unwrap_or_default();
 
@@ -85,21 +88,25 @@ pub fn list() -> Result<(), String> {
         if let Ok(content) = fs::read_to_string(&path)
             && let Ok(val) = content.parse::<toml::Table>()
         {
-            let name = fname.strip_prefix("schedule-")
+            let name = fname
+                .strip_prefix("schedule-")
                 .and_then(|s| s.strip_suffix(".toml"))
                 .unwrap_or(&fname);
 
-            let cron = val.get("schedule")
+            let cron = val
+                .get("schedule")
                 .and_then(|s| s.get("cron"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("?");
 
-            let cmd = val.get("schedule")
+            let cmd = val
+                .get("schedule")
                 .and_then(|s| s.get("command"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("?");
 
-            let last_run = state.get(name)
+            let last_run = state
+                .get(name)
                 .map(|ts| format!(" (last: {ts})"))
                 .unwrap_or_default();
 
@@ -123,11 +130,12 @@ pub fn remove(name: &str) -> Result<(), String> {
     let plugin_path = xdg::plugins_dir().join(format!("schedule-{name}.toml"));
 
     if !plugin_path.exists() {
-        return Err(format!("Schedule '{name}' not found. Use `harness schedule list` to see scheduled tasks."));
+        return Err(format!(
+            "Schedule '{name}' not found. Use `harness schedule list` to see scheduled tasks."
+        ));
     }
 
-    fs::remove_file(&plugin_path)
-        .map_err(|e| format!("Failed to remove schedule: {e}"))?;
+    fs::remove_file(&plugin_path).map_err(|e| format!("Failed to remove schedule: {e}"))?;
 
     let mut state = load_state();
     state.remove(name);
@@ -145,7 +153,9 @@ pub fn run_now(name: &str) -> Result<(), String> {
 
     let schedules = load_schedules();
     let Some((_, _, cmd)) = schedules.iter().find(|(n, _, _)| n == name) else {
-        return Err(format!("Schedule '{name}' not found. Use `harness schedule list` to see scheduled tasks."));
+        return Err(format!(
+            "Schedule '{name}' not found. Use `harness schedule list` to see scheduled tasks."
+        ));
     };
 
     println!("Running schedule '{name}': `{cmd}`");
@@ -173,7 +183,10 @@ pub fn run_now(name: &str) -> Result<(), String> {
             if output.status.success() {
                 println!("Completed in {:.1}s (exit 0)", duration_ms as f64 / 1000.0);
             } else {
-                println!("Failed with exit code {exit_code} ({:.1}s)", duration_ms as f64 / 1000.0);
+                println!(
+                    "Failed with exit code {exit_code} ({:.1}s)",
+                    duration_ms as f64 / 1000.0
+                );
             }
 
             // Update state and record history
@@ -200,8 +213,7 @@ pub fn history(limit: u32) -> Result<(), String> {
         return Ok(());
     }
 
-    let content = fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read history: {e}"))?;
+    let content = fs::read_to_string(&path).map_err(|e| format!("Failed to read history: {e}"))?;
 
     let lines: Vec<&str> = content.lines().collect();
     let start = lines.len().saturating_sub(limit as usize);
@@ -218,7 +230,10 @@ pub fn history(limit: u32) -> Result<(), String> {
             let ts = entry["timestamp"].as_str().unwrap_or("?");
             let name = entry["schedule"].as_str().unwrap_or("?");
             let cmd = entry["command"].as_str().unwrap_or("?");
-            let exit = entry["exit_code"].as_i64().map(|c| c.to_string()).unwrap_or_else(|| "?".to_string());
+            let exit = entry["exit_code"]
+                .as_i64()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "?".to_string());
             let duration_ms = entry["duration_ms"].as_u64().unwrap_or(0);
             let duration_s = duration_ms as f64 / 1000.0;
 
@@ -247,7 +262,9 @@ pub fn cron_matches_local(cron: &str, now: &chrono::DateTime<chrono::Local>) -> 
         (fields[4], now.weekday().num_days_from_sunday()),
     ];
 
-    checks.iter().all(|(pattern, value)| field_matches(pattern, *value))
+    checks
+        .iter()
+        .all(|(pattern, value)| field_matches(pattern, *value))
 }
 
 fn field_matches(pattern: &str, value: u32) -> bool {
@@ -265,7 +282,8 @@ fn field_matches(pattern: &str, value: u32) -> bool {
         let part = part.trim();
         if let Some((start, end)) = part.split_once('-') {
             if let (Ok(s), Ok(e)) = (start.parse::<u32>(), end.parse::<u32>())
-                && value >= s && value <= e
+                && value >= s
+                && value <= e
             {
                 return true;
             }
@@ -290,7 +308,8 @@ pub fn load_schedules() -> Vec<(String, String, String)> {
     let mut schedules = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        let fname = path.file_name()
+        let fname = path
+            .file_name()
             .map(|f| f.to_string_lossy().to_string())
             .unwrap_or_default();
 
@@ -301,18 +320,21 @@ pub fn load_schedules() -> Vec<(String, String, String)> {
         if let Ok(content) = fs::read_to_string(&path)
             && let Ok(val) = content.parse::<toml::Table>()
         {
-            let name = fname.strip_prefix("schedule-")
+            let name = fname
+                .strip_prefix("schedule-")
                 .and_then(|s| s.strip_suffix(".toml"))
                 .unwrap_or(&fname)
                 .to_string();
 
-            let cron = val.get("schedule")
+            let cron = val
+                .get("schedule")
                 .and_then(|s| s.get("cron"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
 
-            let cmd = val.get("schedule")
+            let cmd = val
+                .get("schedule")
                 .and_then(|s| s.get("command"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
@@ -354,12 +376,18 @@ fn save_state_atomic(state: &HashMap<String, String>) {
 pub fn should_run(name: &str, now_minute: i64) -> bool {
     let mut state = load_state();
     let key = format!("{name}:minute");
-    let last = state.get(&key).and_then(|v| v.parse::<i64>().ok()).unwrap_or(-1);
+    let last = state
+        .get(&key)
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(-1);
     if last == now_minute {
         return false;
     }
     state.insert(key, now_minute.to_string());
-    state.insert(name.to_string(), chrono::Local::now().format("%Y-%m-%d %H:%M").to_string());
+    state.insert(
+        name.to_string(),
+        chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
+    );
     save_state_atomic(&state);
     true
 }
@@ -370,7 +398,10 @@ fn mark_run(name: &str) {
     let now_minute = chrono::Local::now().timestamp() / 60;
     let key = format!("{name}:minute");
     state.insert(key, now_minute.to_string());
-    state.insert(name.to_string(), chrono::Local::now().format("%Y-%m-%d %H:%M").to_string());
+    state.insert(
+        name.to_string(),
+        chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
+    );
     save_state_atomic(&state);
 }
 
@@ -395,17 +426,22 @@ pub fn record_history(name: &str, command: &str, exit_code: i32, duration_ms: u6
 /// Remove history entries older than HISTORY_RETENTION_DAYS.
 fn prune_history() {
     let path = history_path();
-    let Ok(content) = fs::read_to_string(&path) else { return };
+    let Ok(content) = fs::read_to_string(&path) else {
+        return;
+    };
     let cutoff = chrono::Local::now() - chrono::Duration::days(HISTORY_RETENTION_DAYS);
 
-    let kept: Vec<&str> = content.lines().filter(|line| {
-        serde_json::from_str::<serde_json::Value>(line)
-            .ok()
-            .and_then(|v| v["timestamp"].as_str().map(|s| s.to_string()))
-            .and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
-            .map(|dt| dt >= cutoff)
-            .unwrap_or(true) // keep unparseable lines
-    }).collect();
+    let kept: Vec<&str> = content
+        .lines()
+        .filter(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|v| v["timestamp"].as_str().map(|s| s.to_string()))
+                .and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
+                .map(|dt| dt >= cutoff)
+                .unwrap_or(true) // keep unparseable lines
+        })
+        .collect();
 
     if kept.len() < content.lines().count() {
         let tmp_path = path.with_extension("jsonl.tmp");

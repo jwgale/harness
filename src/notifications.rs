@@ -76,9 +76,7 @@ pub fn fire_eval_event(verdict: &Verdict, project: &str, round: u32) {
         Verdict::Fail => NotifyEvent::EvalFail,
         Verdict::Revise => NotifyEvent::EvalRevise,
     };
-    let message = format!(
-        "Harness [{project}] round {round}: {verdict:?}"
-    );
+    let message = format!("Harness [{project}] round {round}: {verdict:?}");
     fire(event, &message);
 }
 
@@ -93,14 +91,21 @@ pub fn fire_schedule_complete(schedule_name: &str, success: bool) {
 fn fire(event: NotifyEvent, message: &str) {
     let plugins = discover_notification_plugins();
     for plugin in &plugins {
-        let Some(notif) = &plugin.notifications else { continue };
+        let Some(notif) = &plugin.notifications else {
+            continue;
+        };
         if !notif.wants_event(event) {
             continue;
         }
         let result = send(notif, message);
         match &result {
             Ok(_) => {
-                eprintln!("[notify:{}] {} -> sent via {}", plugin.name, event.label(), notif.strategy);
+                eprintln!(
+                    "[notify:{}] {} -> sent via {}",
+                    plugin.name,
+                    event.label(),
+                    notif.strategy
+                );
             }
             Err(e) => {
                 eprintln!("[notify:{}] {} -> FAILED: {e}", plugin.name, event.label());
@@ -150,10 +155,19 @@ fn send_slack(config: &NotificationConfig, message: &str) -> Result<(), String> 
 
 /// Send via Telegram Bot API.
 fn send_telegram(config: &NotificationConfig, message: &str) -> Result<(), String> {
-    let token = resolve_credential(config.bot_token.as_deref(), "notifications/telegram/bot-token")
-        .ok_or_else(|| "Telegram requires 'bot_token' or vault credential 'notifications/telegram/bot-token'".to_string())?;
+    let token = resolve_credential(
+        config.bot_token.as_deref(),
+        "notifications/telegram/bot-token",
+    )
+    .ok_or_else(|| {
+        "Telegram requires 'bot_token' or vault credential 'notifications/telegram/bot-token'"
+            .to_string()
+    })?;
     let chat_id = resolve_credential(config.chat_id.as_deref(), "notifications/telegram/chat-id")
-        .ok_or_else(|| "Telegram requires 'chat_id' or vault credential 'notifications/telegram/chat-id'".to_string())?;
+        .ok_or_else(|| {
+        "Telegram requires 'chat_id' or vault credential 'notifications/telegram/chat-id'"
+            .to_string()
+    })?;
     let url = format!("https://api.telegram.org/bot{token}/sendMessage");
     let payload = serde_json::json!({
         "chat_id": chat_id,
@@ -195,8 +209,9 @@ fn send_email(config: &NotificationConfig, message: &str) -> Result<(), String> 
 
 /// Send via generic webhook (POST JSON body with message field).
 fn send_webhook(config: &NotificationConfig, message: &str) -> Result<(), String> {
-    let url = resolve_credential(config.url.as_deref(), "notifications/webhook/url")
-        .ok_or_else(|| "Webhook requires 'url' or vault credential 'notifications/webhook/url'".to_string())?;
+    let url = resolve_credential(config.url.as_deref(), "notifications/webhook/url").ok_or_else(
+        || "Webhook requires 'url' or vault credential 'notifications/webhook/url'".to_string(),
+    )?;
     let payload = serde_json::json!({
         "event": "harness_notification",
         "message": message,
@@ -210,11 +225,19 @@ fn curl_post_json(url: &str, payload: &serde_json::Value) -> Result<(), String> 
     let body = payload.to_string();
     let output = Command::new("curl")
         .args([
-            "-s", "-o", "/dev/null", "-w", "%{http_code}",
-            "-X", "POST",
-            "-H", "Content-Type: application/json",
-            "--max-time", "10",
-            "-d", &body,
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "--max-time",
+            "10",
+            "-d",
+            &body,
             url,
         ])
         .output()

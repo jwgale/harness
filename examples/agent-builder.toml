@@ -2,6 +2,6 @@
 # Copy to ~/.config/harness/agents/
 name = "my-builder"
 role = "builder"
-backend = "claude"
+backend = "codex"
 description = "Implements the spec with full file I/O access"
 timeout_seconds = 1800

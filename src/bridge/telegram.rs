@@ -36,13 +36,11 @@ struct BotCredentials {
 fn resolve_credentials() -> Result<BotCredentials, String> {
     let vc = vault::load_config();
     if !vc.enabled {
-        return Err(
-            "Vault must be enabled for Telegram bridge.\n\
+        return Err("Vault must be enabled for Telegram bridge.\n\
              Run: harness vault init\n\
              Then: harness vault add notifications/telegram/bot-token\n\
              And:  harness vault add notifications/telegram/chat-id"
-                .to_string(),
-        );
+            .to_string());
     }
 
     let bot_token = vault::get_credential_string(&vc, "notifications/telegram/bot-token")
@@ -136,9 +134,18 @@ fn send_message(creds: &BotCredentials, text: &str) -> Result<(), String> {
     let body = payload.to_string();
     let output = Command::new("curl")
         .args([
-            "-s", "-w", "\n%{http_code}", "-X", "POST", "-H",
+            "-s",
+            "-w",
+            "\n%{http_code}",
+            "-X",
+            "POST",
+            "-H",
             "Content-Type: application/json",
-            "--max-time", "10", "-d", &body, &url,
+            "--max-time",
+            "10",
+            "-d",
+            &body,
+            &url,
         ])
         .output()
         .map_err(|e| format!("curl failed: {e}"))?;
@@ -163,9 +170,20 @@ fn send_message(creds: &BotCredentials, text: &str) -> Result<(), String> {
     let plain_body = plain_payload.to_string();
     let plain_output = Command::new("curl")
         .args([
-            "-s", "-o", "/dev/null", "-w", "%{http_code}", "-X", "POST", "-H",
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "-X",
+            "POST",
+            "-H",
             "Content-Type: application/json",
-            "--max-time", "10", "-d", &plain_body, &url,
+            "--max-time",
+            "10",
+            "-d",
+            &plain_body,
+            &url,
         ])
         .output()
         .map_err(|e| format!("curl plain fallback failed: {e}"))?;
@@ -196,8 +214,8 @@ fn get_updates(bot_token: &str, offset: i64) -> Result<Vec<Value>, String> {
         .map_err(|e| format!("curl failed: {e}"))?;
 
     let body = String::from_utf8_lossy(&output.stdout);
-    let parsed: Value =
-        serde_json::from_str(&body).map_err(|e| format!("Failed to parse Telegram response: {e}"))?;
+    let parsed: Value = serde_json::from_str(&body)
+        .map_err(|e| format!("Failed to parse Telegram response: {e}"))?;
 
     if parsed.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         return Err(format!(
@@ -377,8 +395,7 @@ fn cmd_run(args: &str, creds: &Arc<BotCredentials>) -> String {
 
     // Find a workspace with .harness/ to run in
     let work_dir = find_active_workspace().unwrap_or_else(|| {
-        std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
     });
 
     // Create progress socket for real-time updates
@@ -429,7 +446,13 @@ fn cmd_run(args: &str, creds: &Arc<BotCredentials>) -> String {
         let _ = send_message(&creds_clone, &ack);
 
         let result = wait_for_workflow(
-            &mut child, &wf_name, &creds_clone, &work_dir, timeout_secs, progress_receiver, buf_size,
+            &mut child,
+            &wf_name,
+            &creds_clone,
+            &work_dir,
+            timeout_secs,
+            progress_receiver,
+            buf_size,
         );
         // Drop handle to shut down listener cleanly
         drop(listener_handle);
@@ -440,7 +463,12 @@ fn cmd_run(args: &str, creds: &Arc<BotCredentials>) -> String {
     let callback_creds = Arc::clone(creds);
     thread::spawn(move || {
         workflow_completion_callback(
-            child, &wf_name, &callback_creds, &work_dir_display, timeout_secs, progress_receiver,
+            child,
+            &wf_name,
+            &callback_creds,
+            &work_dir_display,
+            timeout_secs,
+            progress_receiver,
         );
         // Drop handle to shut down listener when workflow finishes
         drop(listener_handle);
@@ -516,7 +544,13 @@ fn wait_for_workflow(
         // Check if process finished
         match child.try_wait() {
             Ok(Some(status)) => {
-                return format_completion_result(workflow, &start, status.success(), child, &harness_dir);
+                return format_completion_result(
+                    workflow,
+                    &start,
+                    status.success(),
+                    child,
+                    &harness_dir,
+                );
             }
             Ok(None) => {}
             Err(e) => {
@@ -538,8 +572,7 @@ fn wait_for_workflow(
             let rate_ok = last_send.elapsed().as_secs() >= MIN_SEND_INTERVAL_SECS;
             let has_data = !s.entries.is_empty();
             // Send immediately on significant events (if rate allows) or every 30s as fallback
-            (s.significant_pending && rate_ok)
-                || (has_data && last_send.elapsed().as_secs() >= 30)
+            (s.significant_pending && rate_ok) || (has_data && last_send.elapsed().as_secs() >= 30)
         } else {
             false
         };
@@ -653,7 +686,11 @@ fn workflow_completion_callback(
         match child.try_wait() {
             Ok(Some(status)) => {
                 let result = format_completion_result(
-                    workflow, &start, status.success(), &mut child, &harness_dir,
+                    workflow,
+                    &start,
+                    status.success(),
+                    &mut child,
+                    &harness_dir,
                 );
                 scl_lifecycle::record_bridge_response("telegram", "/run", &result);
                 let _ = send_message(creds, &result);
@@ -713,9 +750,7 @@ fn format_completion_result(
     }
 
     // Capture stderr on failure
-    if !success
-        && let Some(stderr) = child.stderr.take()
-    {
+    if !success && let Some(stderr) = child.stderr.take() {
         use std::io::Read;
         let mut buf = String::new();
         let mut reader = std::io::BufReader::new(stderr);
@@ -783,10 +818,7 @@ fn collect_rich_progress(
             if let Ok(content) = fs::read_to_string(&agent_status)
                 && let Some(last) = content.lines().rev().find(|l| !l.trim().is_empty())
             {
-                agent_lines.push(format!(
-                    "  `{agent_name}`: {}",
-                    truncate_line(last, 80)
-                ));
+                agent_lines.push(format!("  `{agent_name}`: {}", truncate_line(last, 80)));
             }
         }
         if !agent_lines.is_empty() {
@@ -821,9 +853,7 @@ fn collect_agent_summary(harness_dir: &std::path::Path) -> String {
             .unwrap_or_default();
         let agent_status = agent_dir.join("status.md");
         if agent_status.exists() {
-            let size = fs::metadata(&agent_status)
-                .map(|m| m.len())
-                .unwrap_or(0);
+            let size = fs::metadata(&agent_status).map(|m| m.len()).unwrap_or(0);
             if size > 0 {
                 lines.push(format!("  `{agent_name}`: output ({size} bytes)"));
             }
@@ -913,7 +943,11 @@ fn cmd_status() -> String {
                 if let Ok(path) = fs::read_to_string(ws.path()) {
                     let p = path.trim();
                     let has_harness = std::path::Path::new(p).join(".harness").exists();
-                    let tag = if has_harness { "active" } else { "no .harness/" };
+                    let tag = if has_harness {
+                        "active"
+                    } else {
+                        "no .harness/"
+                    };
                     lines.push(format!("  `{name}`: {p} [{tag}]"));
                 }
             }
@@ -991,14 +1025,8 @@ fn cmd_agent(args: &str) -> String {
             && let Ok(content) = fs::read_to_string(&path)
             && let Ok(parsed) = content.parse::<toml::Value>()
         {
-            let name = parsed
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
-            let role = parsed
-                .get("role")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
+            let name = parsed.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+            let role = parsed.get("role").and_then(|v| v.as_str()).unwrap_or("?");
             let backend = parsed
                 .get("backend")
                 .and_then(|v| v.as_str())
@@ -1100,10 +1128,7 @@ fn list_workflows() -> String {
             && let Ok(content) = fs::read_to_string(&path)
             && let Ok(parsed) = content.parse::<toml::Value>()
         {
-            let name = parsed
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
+            let name = parsed.get("name").and_then(|v| v.as_str()).unwrap_or("?");
             let desc = parsed
                 .get("description")
                 .and_then(|v| v.as_str())
@@ -1145,17 +1170,15 @@ pub fn run_listener() -> Result<(), String> {
     let creds = resolve_credentials()?;
 
     // Validate credentials with a getMe call
-    let me_url = format!(
-        "https://api.telegram.org/bot{}/getMe",
-        creds.bot_token
-    );
+    let me_url = format!("https://api.telegram.org/bot{}/getMe", creds.bot_token);
     let output = Command::new("curl")
         .args(["-s", "--max-time", "10", &me_url])
         .output()
         .map_err(|e| format!("curl failed: {e}"))?;
     let me_body = String::from_utf8_lossy(&output.stdout);
-    let me: Value = serde_json::from_str(&me_body)
-        .map_err(|_| "Failed to validate bot token -- invalid response from Telegram API".to_string())?;
+    let me: Value = serde_json::from_str(&me_body).map_err(|_| {
+        "Failed to validate bot token -- invalid response from Telegram API".to_string()
+    })?;
     if me.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         return Err("Invalid bot token -- Telegram API rejected it.".to_string());
     }
@@ -1165,22 +1188,20 @@ pub fn run_listener() -> Result<(), String> {
         .unwrap_or("unknown");
 
     eprintln!("[telegram] Bot @{bot_name} authenticated");
-    eprintln!("[telegram] Listening for commands in chat {}", creds.chat_id);
+    eprintln!(
+        "[telegram] Listening for commands in chat {}",
+        creds.chat_id
+    );
 
     // Record bridge start to SCL
-    scl_lifecycle::record_bridge_event(
-        "telegram",
-        "start",
-        &format!("Bot @{bot_name} listening"),
-    );
+    scl_lifecycle::record_bridge_event("telegram", "start", &format!("Bot @{bot_name} listening"));
 
     // Wrap creds in Arc for sharing with callback threads
     let creds = Arc::new(creds);
     let mut offset = load_offset();
 
     // Track active workflow threads for cleanup
-    let active_threads: Arc<Mutex<Vec<thread::JoinHandle<()>>>> =
-        Arc::new(Mutex::new(Vec::new()));
+    let active_threads: Arc<Mutex<Vec<thread::JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
 
     loop {
         // Clean up finished threads
@@ -1268,10 +1289,7 @@ pub fn is_running() -> bool {
 /// Verify credentials are valid without starting the listener.
 pub fn check_credentials() -> Result<String, String> {
     let creds = resolve_credentials()?;
-    let me_url = format!(
-        "https://api.telegram.org/bot{}/getMe",
-        creds.bot_token
-    );
+    let me_url = format!("https://api.telegram.org/bot{}/getMe", creds.bot_token);
     let output = Command::new("curl")
         .args(["-s", "--max-time", "10", &me_url])
         .output()
@@ -1360,7 +1378,10 @@ mod tests {
 
     #[test]
     fn test_parse_run_args() {
-        assert_eq!(parse_run_args("my-workflow"), ("my-workflow".to_string(), false));
+        assert_eq!(
+            parse_run_args("my-workflow"),
+            ("my-workflow".to_string(), false)
+        );
         assert_eq!(
             parse_run_args("my-workflow --wait"),
             ("my-workflow".to_string(), true)
@@ -1397,7 +1418,10 @@ mod tests {
     fn test_truncate_line() {
         assert_eq!(truncate_line("hello", 10), "hello");
         assert_eq!(truncate_line("  hello  ", 10), "hello");
-        assert_eq!(truncate_line("hello world this is long", 10), "hello worl...");
+        assert_eq!(
+            truncate_line("hello world this is long", 10),
+            "hello worl..."
+        );
     }
 
     #[test]
@@ -1438,7 +1462,8 @@ mod tests {
 
     #[test]
     fn test_collect_rich_progress_empty_dir() {
-        let tmp = std::env::temp_dir().join(format!("harness-test-progress-{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("harness-test-progress-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let start = std::time::Instant::now();
         let progress = collect_rich_progress("test-wf", &start, &tmp);
@@ -1449,7 +1474,8 @@ mod tests {
 
     #[test]
     fn test_collect_rich_progress_with_progress_log() {
-        let tmp = std::env::temp_dir().join(format!("harness-test-progress2-{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("harness-test-progress2-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         std::fs::write(
             tmp.join("progress.log"),
@@ -1457,8 +1483,14 @@ mod tests {
         ).unwrap();
         let start = std::time::Instant::now();
         let progress = collect_rich_progress("test-wf", &start, &tmp);
-        assert!(progress.contains("builder"), "should contain builder line: {progress}");
-        assert!(progress.contains("planner"), "should contain planner line: {progress}");
+        assert!(
+            progress.contains("builder"),
+            "should contain builder line: {progress}"
+        );
+        assert!(
+            progress.contains("planner"),
+            "should contain planner line: {progress}"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1476,7 +1508,8 @@ mod tests {
 
     #[test]
     fn test_collect_agent_summary_empty() {
-        let tmp = std::env::temp_dir().join(format!("harness-test-noagents-{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("harness-test-noagents-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let summary = collect_agent_summary(&tmp);
         assert!(summary.is_empty());

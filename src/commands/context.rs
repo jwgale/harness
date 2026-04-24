@@ -35,7 +35,9 @@ pub fn status() -> Result<(), String> {
             } else {
                 println!();
                 println!("All Claude Code sessions will automatically have SCL access.");
-                println!("Available tools: context_init, context_query, context_record, context_update");
+                println!(
+                    "Available tools: context_init, context_query, context_record, context_update"
+                );
             }
         }
     }
@@ -44,8 +46,9 @@ pub fn status() -> Result<(), String> {
 
 pub fn query(query_text: &str) -> Result<(), String> {
     let gc = GlobalConfig::load();
-    let scl_cfg = gc.scl()
-        .ok_or_else(|| "Shared Context Layer is not enabled. Edit ~/.config/harness/config.toml".to_string())?;
+    let scl_cfg = gc.scl().ok_or_else(|| {
+        "Shared Context Layer is not enabled. Edit ~/.config/harness/config.toml".to_string()
+    })?;
 
     let url = scl_cfg.url();
     if !scl::is_healthy(url) {
@@ -59,8 +62,9 @@ pub fn query(query_text: &str) -> Result<(), String> {
 
 pub fn record(kind: &str, content: &str) -> Result<(), String> {
     let gc = GlobalConfig::load();
-    let scl_cfg = gc.scl()
-        .ok_or_else(|| "Shared Context Layer is not enabled. Edit ~/.config/harness/config.toml".to_string())?;
+    let scl_cfg = gc.scl().ok_or_else(|| {
+        "Shared Context Layer is not enabled. Edit ~/.config/harness/config.toml".to_string()
+    })?;
 
     let url = scl_cfg.url();
     if !scl::is_healthy(url) {

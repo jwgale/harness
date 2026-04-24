@@ -1,7 +1,7 @@
 use crate::artifacts;
 use crate::cli_backend::{self, Backend};
 use crate::config::Config;
-use crate::plugins::{PluginManager, HookPoint};
+use crate::plugins::{HookPoint, PluginManager};
 use crate::prompts;
 use crate::scl_lifecycle;
 
@@ -18,7 +18,12 @@ pub fn run(backend_override: Option<&str>) -> Result<(), String> {
     pm.fire(HookPoint::BeforeBuild);
     println!("Running builder...");
     let prompt = prompts::builder_prompt()?;
-    let output = cli_backend::run_builder(&backend, &config.model, &prompt, config.builder_timeout_seconds)?;
+    let output = cli_backend::run_builder(
+        &backend,
+        &config.model,
+        &prompt,
+        config.builder_timeout_seconds,
+    )?;
     pm.fire(HookPoint::AfterBuild);
     scl_lifecycle::record_build_complete(&config.project_name, 1);
 

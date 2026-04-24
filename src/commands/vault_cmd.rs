@@ -59,7 +59,12 @@ pub fn credential_add(name: &str) -> Result<(), String> {
         return Err("Empty credential value".to_string());
     }
 
-    vault::store_credential(&config, name, &value, Some(&format!("Stored via harness for {name}")))?;
+    vault::store_credential(
+        &config,
+        name,
+        &value,
+        Some(&format!("Stored via harness for {name}")),
+    )?;
     println!("Credential '{name}' stored in vault.");
 
     Ok(())
@@ -94,7 +99,8 @@ pub fn credential_list() -> Result<(), String> {
 fn read_password() -> Result<String, String> {
     // Try to disable echo for password input
     let mut value = String::new();
-    std::io::stdin().read_line(&mut value)
+    std::io::stdin()
+        .read_line(&mut value)
         .map_err(|e| format!("Failed to read input: {e}"))?;
     Ok(value.trim().to_string())
 }

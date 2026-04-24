@@ -1,11 +1,11 @@
 use crate::agents::{self, AgentDef};
 use crate::artifacts;
 use crate::cli_backend::{self, Backend};
+use crate::commands::evaluate::Verdict;
 use crate::commands::{build, evaluate, plan};
 use crate::config::Config;
-use crate::commands::evaluate::Verdict;
 use crate::notifications;
-use crate::plugins::{PluginManager, HookPoint};
+use crate::plugins::{HookPoint, PluginManager};
 use crate::progress::ProgressSender;
 use crate::prompts;
 use crate::scl_lifecycle;
@@ -24,7 +24,12 @@ pub fn run(
     if !no_tui && !pause_after_plan && !pause_after_eval {
         return crate::tui::run_with_tui(backend_override, max_rounds);
     }
-    run_plain(backend_override, max_rounds, pause_after_plan, pause_after_eval)
+    run_plain(
+        backend_override,
+        max_rounds,
+        pause_after_plan,
+        pause_after_eval,
+    )
 }
 
 fn run_plain(
@@ -54,7 +59,7 @@ fn run_plain(
         println!("\n=== Round {round}/{max} ===\n");
 
         // Save run metadata
-        save_run_metadata(round, backend_override.unwrap_or(&config.backend))?;
+        let run_num = save_run_metadata(round, backend_override.unwrap_or(&config.backend))?;
 
         // Build
         pm.fire(HookPoint::BeforeBuild);
@@ -67,7 +72,7 @@ fn run_plain(
         pm.fire(HookPoint::AfterEvaluate);
 
         // Update run metadata with outcome
-        update_run_outcome(round, &verdict)?;
+        update_run_outcome(run_num, &verdict)?;
 
         match verdict {
             Verdict::Pass => {
@@ -104,7 +109,7 @@ fn wait_for_enter() {
     let _ = io::stdin().read_line(&mut input);
 }
 
-fn save_run_metadata(round: u32, backend: &str) -> Result<(), String> {
+fn save_run_metadata(round: u32, backend: &str) -> Result<u32, String> {
     let run_num = artifacts::next_run_number();
     let metadata = serde_json::json!({
         "id": run_num,
@@ -117,20 +122,19 @@ fn save_run_metadata(round: u32, backend: &str) -> Result<(), String> {
     });
     let json = serde_json::to_string_pretty(&metadata)
         .map_err(|e| format!("Failed to serialize run metadata: {e}"))?;
-    artifacts::write_artifact(&format!("runs/run-{run_num:03}.json"), &json)
+    artifacts::write_artifact(&format!("runs/run-{run_num:03}.json"), &json)?;
+    Ok(run_num)
 }
 
-fn update_run_outcome(round: u32, verdict: &Verdict) -> Result<(), String> {
-    // Find the run file for this round and update it
-    let run_num = if round == 1 { 1 } else { round };
+fn update_run_outcome(run_num: u32, verdict: &Verdict) -> Result<(), String> {
     let path = format!("runs/run-{run_num:03}.json");
     if let Ok(content) = artifacts::read_artifact(&path)
         && let Ok(mut meta) = serde_json::from_str::<serde_json::Value>(&content)
     {
         meta["ended_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
         meta["outcome"] = serde_json::json!(format!("{verdict:?}"));
-        let json = serde_json::to_string_pretty(&meta)
-            .map_err(|e| format!("Failed to serialize: {e}"))?;
+        let json =
+            serde_json::to_string_pretty(&meta).map_err(|e| format!("Failed to serialize: {e}"))?;
         artifacts::write_artifact(&path, &json)?;
     }
     Ok(())
@@ -152,7 +156,10 @@ pub fn run_multi_agent(
     // If TUI enabled, delegate to the TUI wrapper
     if !no_tui {
         return crate::tui::run_multi_agent_tui(
-            backend_override, agents_csv, workflow_name, parallel,
+            backend_override,
+            agents_csv,
+            workflow_name,
+            parallel,
         );
     }
 
@@ -181,16 +188,27 @@ pub fn run_multi_agent(
         let name_refs: Vec<&str> = agent_names.iter().map(|s| s.as_str()).collect();
         scl_lifecycle::record_agent_run_start(&config.project_name, &name_refs);
 
-        println!("Running workflow '{}' ({} groups from {} steps)", wf.name, groups.len(), wf.steps.len());
+        println!(
+            "Running workflow '{}' ({} groups from {} steps)",
+            wf.name,
+            groups.len(),
+            wf.steps.len()
+        );
         if let Some(ref ps) = progress {
-            ps.event(&format!("Workflow '{}' started ({} steps)", wf.name, wf.steps.len()));
+            ps.event(&format!(
+                "Workflow '{}' started ({} steps)",
+                wf.name,
+                wf.steps.len()
+            ));
         }
 
         let result = run_step_groups(&groups, backend_override, &config, &pm, progress.as_ref());
 
         let status = if result.is_ok() { "completed" } else { "FAIL" };
         scl_lifecycle::record_agent_run_end(&config.project_name, &name_refs, status);
-        if let Some(ref ps) = progress { ps.done(&format!("Workflow '{}' {status}", wf.name)); }
+        if let Some(ref ps) = progress {
+            ps.done(&format!("Workflow '{}' {status}", wf.name));
+        }
         println!("\n=== Workflow '{}' {status} ===", wf.name);
         return result;
     }
@@ -203,18 +221,20 @@ pub fn run_multi_agent(
 
         if parallel {
             println!("Running {} agents in parallel: {csv}", defs.len());
-            let steps: Vec<workflows::WorkflowStep> = defs.iter().map(|a| {
-                workflows::WorkflowStep {
+            let steps: Vec<workflows::WorkflowStep> = defs
+                .iter()
+                .map(|a| workflows::WorkflowStep {
                     agent: a.name.clone(),
                     prompt: None,
                     output_artifact: None,
                     parallel: true,
                     loop_until: None,
                     max_rounds: None,
-                }
-            }).collect();
+                })
+                .collect();
             let group = workflows::StepGroup::Parallel(steps);
-            let result = run_step_groups(&[group], backend_override, &config, &pm, progress.as_ref());
+            let result =
+                run_step_groups(&[group], backend_override, &config, &pm, progress.as_ref());
             let status = if result.is_ok() { "completed" } else { "FAIL" };
             scl_lifecycle::record_agent_run_end(&config.project_name, &names, status);
             println!("\n=== Multi-agent run {status} ===");
@@ -222,17 +242,19 @@ pub fn run_multi_agent(
         }
 
         println!("Running {} agents: {csv}", defs.len());
-        let steps: Vec<workflows::WorkflowStep> = defs.iter().map(|a| {
-            workflows::WorkflowStep {
+        let steps: Vec<workflows::WorkflowStep> = defs
+            .iter()
+            .map(|a| workflows::WorkflowStep {
                 agent: a.name.clone(),
                 prompt: None,
                 output_artifact: None,
                 parallel: false,
                 loop_until: None,
                 max_rounds: None,
-            }
-        }).collect();
-        let groups: Vec<workflows::StepGroup> = steps.into_iter()
+            })
+            .collect();
+        let groups: Vec<workflows::StepGroup> = steps
+            .into_iter()
             .map(workflows::StepGroup::Single)
             .collect();
         let result = run_step_groups(&groups, backend_override, &config, &pm, progress.as_ref());
@@ -277,43 +299,92 @@ pub fn run_step_groups_with_tui(
                         (gi + 1) as u32,
                     ));
                 }
-                println!("\n--- Group {}/{}: agent '{}' ---", gi + 1, groups.len(), step.agent);
-                let msg = format!("Step {}/{}: agent '{}' started", gi + 1, groups.len(), step.agent);
-                if let Some(ps) = progress { ps.event(&msg); }
+                println!(
+                    "\n--- Group {}/{}: agent '{}' ---",
+                    gi + 1,
+                    groups.len(),
+                    step.agent
+                );
+                let msg = format!(
+                    "Step {}/{}: agent '{}' started",
+                    gi + 1,
+                    groups.len(),
+                    step.agent
+                );
+                if let Some(ps) = progress {
+                    ps.event(&msg);
+                }
                 run_single_step_streaming(step, backend_override, config, pm, tui_tx, progress)?;
-                let msg = format!("Step {}/{}: agent '{}' done", gi + 1, groups.len(), step.agent);
-                if let Some(ps) = progress { ps.event(&msg); }
+                let msg = format!(
+                    "Step {}/{}: agent '{}' done",
+                    gi + 1,
+                    groups.len(),
+                    step.agent
+                );
+                if let Some(ps) = progress {
+                    ps.event(&msg);
+                }
             }
             workflows::StepGroup::Parallel(steps) => {
                 let names: Vec<&str> = steps.iter().map(|s| s.agent.as_str()).collect();
                 if let Some(tx) = tui_tx {
                     let _ = tx.send(crate::tui::TuiEvent::PhaseChange(
-                        crate::tui::TuiPhase::Parallel(names.iter().map(|s| s.to_string()).collect()),
+                        crate::tui::TuiPhase::Parallel(
+                            names.iter().map(|s| s.to_string()).collect(),
+                        ),
                         (gi + 1) as u32,
                     ));
                 }
-                println!("\n--- Group {}/{}: parallel [{}] ---", gi + 1, groups.len(), names.join(", "));
+                println!(
+                    "\n--- Group {}/{}: parallel [{}] ---",
+                    gi + 1,
+                    groups.len(),
+                    names.join(", ")
+                );
                 let msg = format!("Parallel batch: [{}]", names.join(", "));
-                if let Some(ps) = progress { ps.event(&msg); }
+                if let Some(ps) = progress {
+                    ps.event(&msg);
+                }
                 scl_lifecycle::record_parallel_start(&config.project_name, &names);
                 run_parallel_steps(steps, backend_override, config, pm, tui_tx, progress)?;
                 scl_lifecycle::record_parallel_end(&config.project_name, &names);
                 let msg = format!("Parallel batch done: [{}]", names.join(", "));
-                if let Some(ps) = progress { ps.event(&msg); }
+                if let Some(ps) = progress {
+                    ps.event(&msg);
+                }
             }
-            workflows::StepGroup::Loop { body, evaluator, max_rounds } => {
+            workflows::StepGroup::Loop {
+                body,
+                evaluator,
+                max_rounds,
+            } => {
                 let body_names: Vec<&str> = body.iter().map(|s| s.agent.as_str()).collect();
                 if let Some(tx) = tui_tx {
                     let _ = tx.send(crate::tui::TuiEvent::PhaseChange(
-                        crate::tui::TuiPhase::Loop { round: 1, max: *max_rounds },
+                        crate::tui::TuiPhase::Loop {
+                            round: 1,
+                            max: *max_rounds,
+                        },
                         (gi + 1) as u32,
                     ));
                 }
                 println!(
                     "\n--- Group {}/{}: loop [{}] -> evaluator '{}' (max {max_rounds} rounds) ---",
-                    gi + 1, groups.len(), body_names.join(", "), evaluator.agent
+                    gi + 1,
+                    groups.len(),
+                    body_names.join(", "),
+                    evaluator.agent
                 );
-                run_iterative_loop(body, evaluator, *max_rounds, backend_override, config, pm, tui_tx, progress)?;
+                run_iterative_loop(
+                    body,
+                    evaluator,
+                    *max_rounds,
+                    backend_override,
+                    config,
+                    pm,
+                    tui_tx,
+                    progress,
+                )?;
             }
         }
     }
@@ -351,8 +422,15 @@ fn run_single_step_streaming(
             pm.fire(HookPoint::BeforePlan);
             artifacts::write_artifact("spec.md", &output)?;
             pm.fire(HookPoint::AfterPlan);
-            scl_lifecycle::record_agent_step(&config.project_name, &agent.name, "planner", "completed");
-            if let Some(ps) = progress { ps.event(&format!("Planner '{}' done -- spec.md written", agent.name)); }
+            scl_lifecycle::record_agent_step(
+                &config.project_name,
+                &agent.name,
+                "planner",
+                "completed",
+            );
+            if let Some(ps) = progress {
+                ps.event(&format!("Planner '{}' done -- spec.md written", agent.name));
+            }
             println!("  Plan written to .harness/spec.md");
             Ok(None)
         }
@@ -360,8 +438,15 @@ fn run_single_step_streaming(
             pm.fire(HookPoint::BeforeBuild);
             artifacts::write_artifact("status.md", &output)?;
             pm.fire(HookPoint::AfterBuild);
-            scl_lifecycle::record_agent_step(&config.project_name, &agent.name, "builder", "completed");
-            if let Some(ps) = progress { ps.event(&format!("Builder '{}' done", agent.name)); }
+            scl_lifecycle::record_agent_step(
+                &config.project_name,
+                &agent.name,
+                "builder",
+                "completed",
+            );
+            if let Some(ps) = progress {
+                ps.event(&format!("Builder '{}' done", agent.name));
+            }
             println!("  Build complete.");
             Ok(None)
         }
@@ -374,11 +459,15 @@ fn run_single_step_streaming(
             let verdict = evaluate::parse_verdict(&output);
             pm.fire(HookPoint::AfterEvaluate);
             scl_lifecycle::record_agent_step(
-                &config.project_name, &agent.name, "evaluator",
+                &config.project_name,
+                &agent.name,
+                "evaluator",
                 &format!("{verdict:?}"),
             );
             notifications::fire_eval_event(&verdict, &config.project_name, fb_round);
-            if let Some(ps) = progress { ps.event(&format!("Evaluator '{}' verdict: {verdict:?}", agent.name)); }
+            if let Some(ps) = progress {
+                ps.event(&format!("Evaluator '{}' verdict: {verdict:?}", agent.name));
+            }
             println!("  Verdict: {verdict:?}");
 
             match &verdict {
@@ -392,11 +481,17 @@ fn run_single_step_streaming(
         }
         _ => {
             let default_artifact = format!("agent-{}.md", agent.name);
-            let artifact_name = step.output_artifact.as_deref()
-                .unwrap_or(&default_artifact);
+            let artifact_name = step.output_artifact.as_deref().unwrap_or(&default_artifact);
             artifacts::write_artifact(artifact_name, &output)?;
-            scl_lifecycle::record_agent_step(&config.project_name, &agent.name, "custom", "completed");
-            if let Some(ps) = progress { ps.event(&format!("Agent '{}' done -- {artifact_name}", agent.name)); }
+            scl_lifecycle::record_agent_step(
+                &config.project_name,
+                &agent.name,
+                "custom",
+                "completed",
+            );
+            if let Some(ps) = progress {
+                ps.event(&format!("Agent '{}' done -- {artifact_name}", agent.name));
+            }
             println!("  Output written to .harness/{artifact_name}");
             Ok(None)
         }
@@ -423,12 +518,16 @@ fn run_agent_invocation(
 
         let name = agent.name.clone();
         loop {
-            match proc.lines.recv_timeout(std::time::Duration::from_millis(50)) {
+            match proc
+                .lines
+                .recv_timeout(std::time::Duration::from_millis(50))
+            {
                 Ok(line) => {
                     // Forward to TUI if available
                     if let Some(tx) = tui_tx {
                         let _ = tx.send(crate::tui::TuiEvent::AgentOutputLine(
-                            name.clone(), line.clone(),
+                            name.clone(),
+                            line.clone(),
                         ));
                     }
                     // Forward to progress socket if available
@@ -459,7 +558,8 @@ fn run_parallel_steps(
 ) -> Result<(), String> {
     let mut handles = Vec::new();
 
-    let hook_roles: Vec<String> = steps.iter()
+    let hook_roles: Vec<String> = steps
+        .iter()
         .filter_map(|s| agents::load(&s.agent).ok().map(|a| a.role))
         .collect();
 
@@ -490,9 +590,7 @@ fn run_parallel_steps(
                 agent.prompt_template = step.prompt.clone();
             }
 
-            let backend = Backend::from_str(
-                backend_str.as_deref().unwrap_or(&agent.backend),
-            )?;
+            let backend = Backend::from_str(backend_str.as_deref().unwrap_or(&agent.backend))?;
             let model_owned = agent.model.clone().unwrap_or_else(|| config.model.clone());
             let timeout = agent.timeout_seconds.unwrap_or(match agent.role.as_str() {
                 "builder" => config.builder_timeout_seconds,
@@ -511,11 +609,15 @@ fn run_parallel_steps(
 
                 let name = agent.name.clone();
                 loop {
-                    match proc.lines.recv_timeout(std::time::Duration::from_millis(50)) {
+                    match proc
+                        .lines
+                        .recv_timeout(std::time::Duration::from_millis(50))
+                    {
                         Ok(line) => {
                             if let Some(ref tx) = tui_sender {
                                 let _ = tx.send(crate::tui::TuiEvent::AgentOutputLine(
-                                    name.clone(), line.clone(),
+                                    name.clone(),
+                                    line.clone(),
                                 ));
                             }
                             if let Some(ref ps) = progress_sender {
@@ -550,8 +652,16 @@ fn run_parallel_steps(
                 artifacts::write_artifact(custom, &output)?;
             }
 
-            scl_lifecycle::record_agent_step(&config.project_name, &agent.name, &agent.role, "completed");
-            eprintln!("  [parallel] agent '{}' [{}] -> .harness/agents/{}/{default_artifact}", agent.name, agent.role, agent.name);
+            scl_lifecycle::record_agent_step(
+                &config.project_name,
+                &agent.name,
+                &agent.role,
+                "completed",
+            );
+            eprintln!(
+                "  [parallel] agent '{}' [{}] -> .harness/agents/{}/{default_artifact}",
+                agent.name, agent.role, agent.name
+            );
 
             Ok(())
         });
@@ -579,7 +689,10 @@ fn run_parallel_steps(
     }
 
     if !errors.is_empty() {
-        return Err(format!("Parallel execution failed:\n  {}", errors.join("\n  ")));
+        return Err(format!(
+            "Parallel execution failed:\n  {}",
+            errors.join("\n  ")
+        ));
     }
 
     // Merge isolated artifacts into shared location
@@ -606,32 +719,48 @@ fn run_iterative_loop(
     for round in 1..=max_rounds {
         if let Some(tx) = tui_tx {
             let _ = tx.send(crate::tui::TuiEvent::PhaseChange(
-                crate::tui::TuiPhase::Loop { round, max: max_rounds },
+                crate::tui::TuiPhase::Loop {
+                    round,
+                    max: max_rounds,
+                },
                 round,
             ));
         }
         println!("\n  === Iteration {round}/{max_rounds} ===");
         let msg = format!("Loop iteration {round}/{max_rounds}");
-        if let Some(ps) = progress { ps.event(&msg); }
+        if let Some(ps) = progress {
+            ps.event(&msg);
+        }
 
         for step in body {
             run_single_step_streaming(step, backend_override, config, pm, tui_tx, progress)?;
         }
 
-        let verdict = run_single_step_streaming(evaluator_step, backend_override, config, pm, tui_tx, progress)?;
+        let verdict = run_single_step_streaming(
+            evaluator_step,
+            backend_override,
+            config,
+            pm,
+            tui_tx,
+            progress,
+        )?;
 
         scl_lifecycle::record_loop_iteration(&config.project_name, round, max_rounds);
 
         match verdict {
             Some(Verdict::Pass) => {
                 let msg = format!("Loop completed: PASS (round {round})");
-                if let Some(ps) = progress { ps.event(&msg); }
+                if let Some(ps) = progress {
+                    ps.event(&msg);
+                }
                 println!("  Loop completed: PASS on round {round}");
                 return Ok(());
             }
             Some(Verdict::Fail) => {
                 let msg = format!("Loop failed: FAIL (round {round})");
-                if let Some(ps) = progress { ps.event(&msg); }
+                if let Some(ps) = progress {
+                    ps.event(&msg);
+                }
                 return Err(format!("Loop failed: FAIL on round {round}"));
             }
             Some(Verdict::Revise) => {

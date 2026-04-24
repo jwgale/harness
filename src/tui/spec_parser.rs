@@ -26,10 +26,13 @@ pub fn parse_features() -> Vec<Feature> {
     for line in content.lines() {
         let trimmed = line.trim();
         // Match "Feature N: description" or "### Feature N: description"
-        if let Some(rest) = trimmed.strip_prefix("### Feature")
+        if let Some(rest) = trimmed
+            .strip_prefix("### Feature")
             .or_else(|| trimmed.strip_prefix("Feature"))
         {
-            let name = rest.trim_start_matches(|c: char| c.is_ascii_digit() || c == ':' || c == '.' || c == ' ');
+            let name = rest.trim_start_matches(|c: char| {
+                c.is_ascii_digit() || c == ':' || c == '.' || c == ' '
+            });
             if !name.is_empty() {
                 features.push(Feature {
                     name: name.trim().to_string(),
@@ -43,7 +46,10 @@ pub fn parse_features() -> Vec<Feature> {
                 name: rest.to_string(),
                 status: FeatureStatus::NotStarted,
             });
-        } else if let Some(rest) = trimmed.strip_prefix("- [x] ").or_else(|| trimmed.strip_prefix("- [X] ")) {
+        } else if let Some(rest) = trimmed
+            .strip_prefix("- [x] ")
+            .or_else(|| trimmed.strip_prefix("- [X] "))
+        {
             features.push(Feature {
                 name: rest.to_string(),
                 status: FeatureStatus::Completed,
@@ -83,7 +89,10 @@ pub fn update_feature_status(features: &mut [Feature], line: &str) {
         let words: Vec<&str> = feature_lower.split_whitespace().collect();
         // Need at least 2 significant words to match (or all if feature name is short)
         let threshold = if words.len() <= 2 { words.len() } else { 2 };
-        let matched = words.iter().filter(|w| w.len() > 2 && lower.contains(*w)).count();
+        let matched = words
+            .iter()
+            .filter(|w| w.len() > 2 && lower.contains(*w))
+            .count();
         if matched >= threshold {
             feature.status = FeatureStatus::InProgress;
         }

@@ -4,7 +4,10 @@ pub fn run() -> Result<(), String> {
     artifacts::ensure_harness_exists()?;
 
     let mut handoff = String::from("# Handoff Brief\n\n");
-    handoff.push_str(&format!("Generated: {}\n\n", chrono::Utc::now().to_rfc3339()));
+    handoff.push_str(&format!(
+        "Generated: {}\n\n",
+        chrono::Utc::now().to_rfc3339()
+    ));
 
     // Goal
     if let Ok(goal) = artifacts::read_artifact("goal.md") {

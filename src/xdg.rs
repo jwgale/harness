@@ -39,9 +39,15 @@ pub fn workflows_dir() -> PathBuf {
 
 /// Ensure all XDG directories exist.
 pub fn ensure_dirs() -> Result<(), String> {
-    for dir in &[config_dir(), data_dir(), cache_dir(), plugins_dir(), agents_dir(), workflows_dir()] {
-        fs::create_dir_all(dir)
-            .map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
+    for dir in &[
+        config_dir(),
+        data_dir(),
+        cache_dir(),
+        plugins_dir(),
+        agents_dir(),
+        workflows_dir(),
+    ] {
+        fs::create_dir_all(dir).map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
     }
     Ok(())
 }

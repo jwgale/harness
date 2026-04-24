@@ -3,16 +3,20 @@ pub mod spec_parser;
 pub mod status_panel;
 
 use std::sync::mpsc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::ExecutableCommand;
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
+use ratatui::Terminal;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::prelude::CrosstermBackend;
 use ratatui::style::{Color, Style};
 use ratatui::widgets::Paragraph;
-use ratatui::Terminal;
 
 use crate::artifacts;
 use crate::cli_backend::{self, Backend, StreamingProcess};
@@ -20,9 +24,9 @@ use crate::commands::evaluate;
 use crate::config::Config;
 use crate::evaluator;
 use crate::notifications;
-use crate::plugins::{PluginManager, HookPoint};
-use crate::scl_lifecycle;
+use crate::plugins::{HookPoint, PluginManager};
 use crate::prompts;
+use crate::scl_lifecycle;
 
 use self::output_panel::OutputPanel;
 use self::spec_parser::Feature;
@@ -37,7 +41,10 @@ pub enum TuiPhase {
     /// Multi-agent: parallel batch running
     Parallel(Vec<String>),
     /// Multi-agent: iterative loop
-    Loop { round: u32, max: u32 },
+    Loop {
+        round: u32,
+        max: u32,
+    },
     /// Multi-agent: named agent step
     AgentStep(String, String), // (agent_name, role)
 }
@@ -70,9 +77,9 @@ impl TuiPhase {
 
 /// View mode for the TUI layout.
 enum ViewMode {
-    Split,       // status + output (default)
-    OutputOnly,  // full-width output
-    StatusOnly,  // full-width status
+    Split,      // status + output (default)
+    OutputOnly, // full-width output
+    StatusOnly, // full-width status
 }
 
 /// Messages sent from the run loop thread to the TUI.
@@ -92,10 +99,7 @@ pub enum TuiEvent {
 }
 
 /// Run the full harness loop with TUI display.
-pub fn run_with_tui(
-    backend_override: Option<&str>,
-    max_rounds: Option<u32>,
-) -> Result<(), String> {
+pub fn run_with_tui(backend_override: Option<&str>, max_rounds: Option<u32>) -> Result<(), String> {
     artifacts::ensure_harness_exists()?;
     let config = Config::load(&artifacts::harness_dir())?;
     let max = max_rounds.unwrap_or(config.max_eval_rounds);
@@ -103,6 +107,7 @@ pub fn run_with_tui(
     let backend_name = backend_override.unwrap_or(&config.backend).to_string();
     let project_name = config.project_name.clone();
     let model = config.model.clone();
+    let cancel_flag = Arc::new(AtomicBool::new(false));
 
     // Parse features from spec if it exists
     let mut features = spec_parser::parse_features();
@@ -117,6 +122,7 @@ pub fn run_with_tui(
     let model_clone = model.clone();
     let project_clone = project_name.clone();
     let eval_strategy = config.evaluator_strategy.clone();
+    let run_cancel = Arc::clone(&cancel_flag);
     std::thread::spawn(move || {
         let result = run_loop(
             &backend,
@@ -127,19 +133,20 @@ pub fn run_with_tui(
             &tx_clone,
             &project_clone,
             &eval_strategy,
+            &run_cancel,
         );
         let _ = tx_clone.send(TuiEvent::RunFinished(result));
     });
 
     // Setup terminal
-    terminal::enable_raw_mode()
-        .map_err(|e| format!("Failed to enable raw mode: {e}"))?;
+    terminal::enable_raw_mode().map_err(|e| format!("Failed to enable raw mode: {e}"))?;
     let mut stdout = std::io::stdout();
-    stdout.execute(EnterAlternateScreen)
+    stdout
+        .execute(EnterAlternateScreen)
         .map_err(|e| format!("Failed to enter alternate screen: {e}"))?;
     let backend_term = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend_term)
-        .map_err(|e| format!("Failed to create terminal: {e}"))?;
+    let mut terminal =
+        Terminal::new(backend_term).map_err(|e| format!("Failed to create terminal: {e}"))?;
 
     let result = tui_event_loop(
         &mut terminal,
@@ -148,6 +155,7 @@ pub fn run_with_tui(
         &backend_name,
         max,
         &mut features,
+        &cancel_flag,
     );
 
     // Restore terminal
@@ -167,6 +175,7 @@ fn run_loop(
     tx: &mpsc::Sender<TuiEvent>,
     project_name: &str,
     eval_strategy: &str,
+    cancel_flag: &Arc<AtomicBool>,
 ) -> Result<String, String> {
     // Create a channel that routes plugin hook output into the TUI output panel
     let hook_tx = tx.clone();
@@ -183,11 +192,9 @@ fn run_loop(
     // Phase 1: Plan
     let _ = tx.send(TuiEvent::PhaseChange(TuiPhase::Plan, 0));
     pm.fire(HookPoint::BeforePlan);
-    let prompt = prompts::planner_prompt(
-        &artifacts::read_artifact("goal.md")?,
-    );
+    let prompt = prompts::planner_prompt(&artifacts::read_artifact("goal.md")?);
     let proc = cli_backend::run_oneshot_streaming(backend, model, &prompt, eval_timeout)?;
-    let output = drain_streaming(proc, tx);
+    let output = drain_streaming(proc, tx, cancel_flag);
     let plan_output = output?;
     artifacts::write_artifact("spec.md", &plan_output)?;
     pm.fire(HookPoint::AfterPlan);
@@ -198,11 +205,11 @@ fn run_loop(
     for round in 1..=max_rounds {
         // Build
         let _ = tx.send(TuiEvent::PhaseChange(TuiPhase::Build, round));
-        save_run_metadata(round, backend)?;
+        let run_num = save_run_metadata(round, backend)?;
         pm.fire(HookPoint::BeforeBuild);
         let prompt = prompts::builder_prompt()?;
         let proc = cli_backend::run_builder_streaming(backend, model, &prompt, builder_timeout)?;
-        let _output = drain_streaming(proc, tx)?;
+        let _output = drain_streaming(proc, tx, cancel_flag)?;
         pm.fire(HookPoint::AfterBuild);
         scl_lifecycle::record_build_complete(project_name, round);
         let _ = tx.send(TuiEvent::PhaseComplete);
@@ -220,7 +227,7 @@ fn run_loop(
         };
 
         let proc = cli_backend::run_oneshot_streaming(backend, model, &prompt, eval_timeout)?;
-        let eval_output = drain_streaming(proc, tx)?;
+        let eval_output = drain_streaming(proc, tx, cancel_flag)?;
 
         artifacts::write_artifact("evaluation.md", &eval_output)?;
         let fb_round = artifacts::next_feedback_number();
@@ -229,12 +236,17 @@ fn run_loop(
         let verdict = evaluate::parse_verdict(&eval_output);
         let scores = EvalScores::parse(&eval_output);
         pm.fire(HookPoint::AfterEvaluate);
-        scl_lifecycle::record_eval_complete(project_name, round, &format!("{verdict:?}"), eval_strategy);
+        scl_lifecycle::record_eval_complete(
+            project_name,
+            round,
+            &format!("{verdict:?}"),
+            eval_strategy,
+        );
         notifications::fire_eval_event(&verdict, project_name, round);
         let _ = tx.send(TuiEvent::EvalResult(scores, verdict.clone()));
         let _ = tx.send(TuiEvent::PhaseComplete);
 
-        update_run_outcome(round, &verdict)?;
+        update_run_outcome(run_num, &verdict)?;
 
         match verdict {
             evaluate::Verdict::Pass => {
@@ -247,7 +259,9 @@ fn run_loop(
             }
             evaluate::Verdict::Revise => {
                 if round == max_rounds {
-                    return Err(format!("Max rounds ({max_rounds}) exhausted. Last verdict: REVISE"));
+                    return Err(format!(
+                        "Max rounds ({max_rounds}) exhausted. Last verdict: REVISE"
+                    ));
                 }
             }
         }
@@ -259,9 +273,16 @@ fn run_loop(
 fn drain_streaming(
     proc: StreamingProcess,
     tx: &mpsc::Sender<TuiEvent>,
+    cancel_flag: &AtomicBool,
 ) -> Result<String, String> {
+    let proc = proc;
     // Read lines from the process and forward to TUI
     loop {
+        if cancel_flag.load(Ordering::Relaxed) {
+            let _ = proc.kill();
+            let _ = proc.wait();
+            return Err("Aborted by user".to_string());
+        }
         match proc.lines.recv_timeout(Duration::from_millis(50)) {
             Ok(line) => {
                 let _ = tx.send(TuiEvent::OutputLine(line));
@@ -280,6 +301,7 @@ fn tui_event_loop(
     backend_name: &str,
     max_rounds: u32,
     features: &mut Vec<Feature>,
+    cancel_flag: &Arc<AtomicBool>,
 ) -> Result<(), String> {
     let mut output_panel = OutputPanel::new();
     let mut phase = TuiPhase::Plan;
@@ -290,8 +312,8 @@ fn tui_event_loop(
     let mut run_result: Option<Result<String, String>> = None;
 
     loop {
-        // Process TUI events (non-blocking)
-        loop {
+        // Process a bounded batch of TUI events so keyboard input does not starve
+        for _ in 0..256 {
             match rx.try_recv() {
                 Ok(TuiEvent::OutputLine(line)) => {
                     spec_parser::update_feature_status(features, &line);
@@ -328,67 +350,97 @@ fn tui_event_loop(
 
         // Render
         let elapsed = start_time.elapsed().as_secs();
-        terminal.draw(|frame| {
-            let area = frame.area();
-            match view_mode {
-                ViewMode::Split => {
-                    let chunks = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([
-                            Constraint::Percentage(35),
-                            Constraint::Percentage(65),
-                        ])
-                        .split(area);
-                    status_panel::render(
-                        frame, chunks[0], project_name, &phase, round,
-                        max_rounds, backend_name, elapsed, features, &scores,
-                        &output_panel.legend(),
-                    );
-                    output_panel.render(frame, chunks[1]);
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                match view_mode {
+                    ViewMode::Split => {
+                        let chunks = Layout::default()
+                            .direction(Direction::Horizontal)
+                            .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+                            .split(area);
+                        status_panel::render(
+                            frame,
+                            chunks[0],
+                            project_name,
+                            &phase,
+                            round,
+                            max_rounds,
+                            backend_name,
+                            elapsed,
+                            features,
+                            &scores,
+                            &output_panel.legend(),
+                        );
+                        output_panel.render(frame, chunks[1]);
+                    }
+                    ViewMode::OutputOnly => {
+                        output_panel.render(frame, area);
+                    }
+                    ViewMode::StatusOnly => {
+                        status_panel::render(
+                            frame,
+                            area,
+                            project_name,
+                            &phase,
+                            round,
+                            max_rounds,
+                            backend_name,
+                            elapsed,
+                            features,
+                            &scores,
+                            &output_panel.legend(),
+                        );
+                    }
                 }
-                ViewMode::OutputOnly => {
-                    output_panel.render(frame, area);
-                }
-                ViewMode::StatusOnly => {
-                    status_panel::render(
-                        frame, area, project_name, &phase, round,
-                        max_rounds, backend_name, elapsed, features, &scores,
-                        &output_panel.legend(),
-                    );
-                }
-            }
 
-            // Show "finished" bar at bottom if done
-            if let Some(ref result) = run_result {
-                let msg = match result {
-                    Ok(s) => format!(" {s} — press q to exit "),
-                    Err(s) => format!(" {s} — press q to exit "),
-                };
-                let color = if result.is_ok() { Color::Green } else { Color::Red };
-                let bar_area = Rect::new(area.x, area.y + area.height.saturating_sub(1), area.width, 1);
-                let bar = Paragraph::new(msg)
-                    .style(Style::default().fg(Color::White).bg(color));
-                frame.render_widget(bar, bar_area);
-            }
-        }).map_err(|e| format!("Draw error: {e}"))?;
+                // Show "finished" bar at bottom if done
+                if let Some(ref result) = run_result {
+                    let msg = match result {
+                        Ok(s) => format!(" {s} — press q to exit "),
+                        Err(s) => format!(" {s} — press q to exit "),
+                    };
+                    let color = if result.is_ok() {
+                        Color::Green
+                    } else {
+                        Color::Red
+                    };
+                    let bar_area = Rect::new(
+                        area.x,
+                        area.y + area.height.saturating_sub(1),
+                        area.width,
+                        1,
+                    );
+                    let bar =
+                        Paragraph::new(msg).style(Style::default().fg(Color::White).bg(color));
+                    frame.render_widget(bar, bar_area);
+                }
+            })
+            .map_err(|e| format!("Draw error: {e}"))?;
 
         // Handle keyboard input
-        if event::poll(Duration::from_millis(50))
-            .map_err(|e| format!("Event poll error: {e}"))?
-            && let Event::Key(key) = event::read()
-                .map_err(|e| format!("Event read error: {e}"))?
+        if event::poll(Duration::from_millis(50)).map_err(|e| format!("Event poll error: {e}"))?
+            && let Event::Key(key) = event::read().map_err(|e| format!("Event read error: {e}"))?
         {
             if key.kind != KeyEventKind::Press {
                 continue;
             }
             match key.code {
-                KeyCode::Char('q') => {
+                KeyCode::Char('q') | KeyCode::Char('Q') => {
+                    cancel_flag.store(true, Ordering::Relaxed);
                     if let Some(result) = run_result {
                         return result.map(|_| ());
                     }
                     return Err("Aborted by user".to_string());
                 }
-                KeyCode::Char('f') | KeyCode::End => {
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    cancel_flag.store(true, Ordering::Relaxed);
+                    if let Some(result) = run_result {
+                        return result.map(|_| ());
+                    }
+                    return Err("Aborted by user".to_string());
+                }
+                KeyCode::Char('f') | KeyCode::Char('F') | KeyCode::End => {
                     output_panel.toggle_follow();
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -416,7 +468,9 @@ fn tui_event_loop(
                 KeyCode::Char('1') => view_mode = ViewMode::Split,
                 KeyCode::Char('2') => view_mode = ViewMode::OutputOnly,
                 KeyCode::Char('3') => view_mode = ViewMode::StatusOnly,
-                KeyCode::Char('`') => { output_panel.cycle_filter(); }
+                KeyCode::Char('`') => {
+                    output_panel.cycle_filter();
+                }
                 KeyCode::Char('4') => output_panel.set_filter(0), // All
                 KeyCode::Char('5') => output_panel.set_filter(1), // Agent 1
                 KeyCode::Char('6') => output_panel.set_filter(2), // Agent 2
@@ -427,7 +481,7 @@ fn tui_event_loop(
     }
 }
 
-fn save_run_metadata(round: u32, backend: &Backend) -> Result<(), String> {
+fn save_run_metadata(round: u32, backend: &Backend) -> Result<u32, String> {
     let backend_str = match backend {
         Backend::Claude => "claude",
         Backend::Codex => "codex",
@@ -445,19 +499,19 @@ fn save_run_metadata(round: u32, backend: &Backend) -> Result<(), String> {
     });
     let json = serde_json::to_string_pretty(&metadata)
         .map_err(|e| format!("Failed to serialize run metadata: {e}"))?;
-    artifacts::write_artifact(&format!("runs/run-{run_num:03}.json"), &json)
+    artifacts::write_artifact(&format!("runs/run-{run_num:03}.json"), &json)?;
+    Ok(run_num)
 }
 
-fn update_run_outcome(round: u32, verdict: &evaluate::Verdict) -> Result<(), String> {
-    let run_num = if round == 1 { 1 } else { round };
+fn update_run_outcome(run_num: u32, verdict: &evaluate::Verdict) -> Result<(), String> {
     let path = format!("runs/run-{run_num:03}.json");
     if let Ok(content) = artifacts::read_artifact(&path)
         && let Ok(mut meta) = serde_json::from_str::<serde_json::Value>(&content)
     {
         meta["ended_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
         meta["outcome"] = serde_json::json!(format!("{verdict:?}"));
-        let json = serde_json::to_string_pretty(&meta)
-            .map_err(|e| format!("Failed to serialize: {e}"))?;
+        let json =
+            serde_json::to_string_pretty(&meta).map_err(|e| format!("Failed to serialize: {e}"))?;
         artifacts::write_artifact(&path, &json)?;
     }
     Ok(())
@@ -475,6 +529,7 @@ pub fn run_multi_agent_tui(
     let config = Config::load(&artifacts::harness_dir())?;
     let project_name = config.project_name.clone();
     let backend_name = backend_override.unwrap_or(&config.backend).to_string();
+    let cancel_flag = Arc::new(AtomicBool::new(false));
 
     let features = spec_parser::parse_features();
 
@@ -497,24 +552,29 @@ pub fn run_multi_agent_tui(
             &tx_clone,
         );
         let _ = tx_clone.send(TuiEvent::RunFinished(
-            result.map(|_| "Multi-agent run complete".to_string())
+            result.map(|_| "Multi-agent run complete".to_string()),
         ));
     });
 
     // Setup terminal
-    terminal::enable_raw_mode()
-        .map_err(|e| format!("Failed to enable raw mode: {e}"))?;
+    terminal::enable_raw_mode().map_err(|e| format!("Failed to enable raw mode: {e}"))?;
     let mut stdout = std::io::stdout();
-    stdout.execute(EnterAlternateScreen)
+    stdout
+        .execute(EnterAlternateScreen)
         .map_err(|e| format!("Failed to enter alternate screen: {e}"))?;
     let backend_term = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend_term)
-        .map_err(|e| format!("Failed to create terminal: {e}"))?;
+    let mut terminal =
+        Terminal::new(backend_term).map_err(|e| format!("Failed to create terminal: {e}"))?;
 
     let mut features = features;
     let result = tui_event_loop(
-        &mut terminal, &rx, &project_name, &backend_name,
-        0, &mut features,
+        &mut terminal,
+        &rx,
+        &project_name,
+        &backend_name,
+        0,
+        &mut features,
+        &cancel_flag,
     );
 
     terminal::disable_raw_mode().ok();
@@ -560,11 +620,14 @@ fn run_multi_agent_with_events(
         let name_refs: Vec<&str> = agent_names.iter().map(|s| s.as_str()).collect();
         scl_lifecycle::record_agent_run_start(&config.project_name, &name_refs);
 
-        let _ = tx.send(TuiEvent::OutputLine(
-            format!("Running workflow '{}' ({} groups)", wf.name, groups.len())
-        ));
+        let _ = tx.send(TuiEvent::OutputLine(format!(
+            "Running workflow '{}' ({} groups)",
+            wf.name,
+            groups.len()
+        )));
 
-        let result = run_step_groups_with_tui(&groups, backend_override, &config, &pm, Some(tx), None);
+        let result =
+            run_step_groups_with_tui(&groups, backend_override, &config, &pm, Some(tx), None);
 
         let status = if result.is_ok() { "completed" } else { "FAIL" };
         scl_lifecycle::record_agent_run_end(&config.project_name, &name_refs, status);
@@ -582,24 +645,29 @@ fn run_multi_agent_with_events(
             let _ = tx.send(TuiEvent::PhaseChange(TuiPhase::Parallel(names_owned), 1));
         }
 
-        let steps: Vec<workflows::WorkflowStep> = defs.iter().map(|a| {
-            workflows::WorkflowStep {
+        let steps: Vec<workflows::WorkflowStep> = defs
+            .iter()
+            .map(|a| workflows::WorkflowStep {
                 agent: a.name.clone(),
                 prompt: None,
                 output_artifact: None,
                 parallel,
                 loop_until: None,
                 max_rounds: None,
-            }
-        }).collect();
+            })
+            .collect();
 
         let groups: Vec<workflows::StepGroup> = if parallel {
             vec![workflows::StepGroup::Parallel(steps)]
         } else {
-            steps.into_iter().map(workflows::StepGroup::Single).collect()
+            steps
+                .into_iter()
+                .map(workflows::StepGroup::Single)
+                .collect()
         };
 
-        let result = run_step_groups_with_tui(&groups, backend_override, &config, &pm, Some(tx), None);
+        let result =
+            run_step_groups_with_tui(&groups, backend_override, &config, &pm, Some(tx), None);
         let status = if result.is_ok() { "completed" } else { "FAIL" };
         scl_lifecycle::record_agent_run_end(&config.project_name, &names, status);
         let _ = tx.send(TuiEvent::PhaseChange(TuiPhase::Done, 0));

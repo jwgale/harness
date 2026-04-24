@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -68,7 +69,9 @@ impl HookOutput {
     fn send(&self, msg: &str) {
         match self {
             HookOutput::Stderr => eprintln!("{msg}"),
-            HookOutput::Channel(tx) => { let _ = tx.send(msg.to_string()); }
+            HookOutput::Channel(tx) => {
+                let _ = tx.send(msg.to_string());
+            }
         }
     }
 }
@@ -86,7 +89,10 @@ impl PluginManager {
         if !plugins.is_empty() {
             eprintln!("Loaded {} plugin(s)", plugins.len());
         }
-        Self { plugins, output: HookOutput::Stderr }
+        Self {
+            plugins,
+            output: HookOutput::Stderr,
+        }
     }
 
     /// Load all plugins, output to a TUI channel.
@@ -95,7 +101,10 @@ impl PluginManager {
         if !plugins.is_empty() {
             let _ = tx.send(format!("Loaded {} plugin(s)", plugins.len()));
         }
-        Self { plugins, output: HookOutput::Channel(tx) }
+        Self {
+            plugins,
+            output: HookOutput::Channel(tx),
+        }
     }
 
     /// Fire a hook point — execute registered commands for each plugin.
@@ -114,29 +123,54 @@ impl PluginManager {
             });
             if let Some(cmd_str) = cmd_str {
                 let timeout = plugin.timeout_seconds.unwrap_or(DEFAULT_HOOK_TIMEOUT);
-                self.output.send(&format!("[plugin:{}] {label} -> `{cmd_str}`", plugin.name));
+                self.output
+                    .send(&format!("[plugin:{}] {label} -> `{cmd_str}`", plugin.name));
                 self.execute_hook(&plugin.name, label, cmd_str, &project_name, timeout);
             }
         }
     }
 
-    fn execute_hook(&self, plugin_name: &str, hook_label: &str, cmd_str: &str, project_name: &str, timeout_secs: u64) {
+    fn execute_hook(
+        &self,
+        plugin_name: &str,
+        hook_label: &str,
+        cmd_str: &str,
+        project_name: &str,
+        timeout_secs: u64,
+    ) {
         let cwd = std::env::current_dir().unwrap_or_default();
+        for temp_dir in hook_temp_dirs(cmd_str) {
+            if let Err(e) = fs::create_dir_all(&temp_dir) {
+                self.output.send(&format!(
+                    "[plugin:{plugin_name}] failed to create hook temp dir {}: {e}",
+                    temp_dir.display()
+                ));
+                return;
+            }
+        }
 
         let mut child = match Command::new("sh")
             .args(["-c", cmd_str])
             .env("HARNESS_HOOK", hook_label)
             .env("HARNESS_PLUGIN", plugin_name)
             .env("HARNESS_PROJECT", project_name)
-            .env("HARNESS_DIR", cwd.join(".harness").to_string_lossy().as_ref())
-            .env("HARNESS_PLUGINS_DIR", xdg::plugins_dir().to_string_lossy().as_ref())
+            .env(
+                "HARNESS_DIR",
+                cwd.join(".harness").to_string_lossy().as_ref(),
+            )
+            .env(
+                "HARNESS_PLUGINS_DIR",
+                xdg::plugins_dir().to_string_lossy().as_ref(),
+            )
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
         {
             Ok(c) => c,
             Err(e) => {
-                self.output.send(&format!("[plugin:{plugin_name}] hook {hook_label} failed to spawn: {e}"));
+                self.output.send(&format!(
+                    "[plugin:{plugin_name}] hook {hook_label} failed to spawn: {e}"
+                ));
                 return;
             }
         };
@@ -166,11 +200,14 @@ impl PluginManager {
                     }
                     for line in stderr.lines() {
                         if !line.trim().is_empty() {
-                            self.output.send(&format!("[plugin:{plugin_name}] stderr: {line}"));
+                            self.output
+                                .send(&format!("[plugin:{plugin_name}] stderr: {line}"));
                         }
                     }
                     if !status.success() {
-                        self.output.send(&format!("[plugin:{plugin_name}] hook {hook_label} exited with {status}"));
+                        self.output.send(&format!(
+                            "[plugin:{plugin_name}] hook {hook_label} exited with {status}"
+                        ));
                     }
                     return;
                 }
@@ -185,11 +222,58 @@ impl PluginManager {
                     std::thread::sleep(Duration::from_millis(100));
                 }
                 Err(e) => {
-                    self.output.send(&format!("[plugin:{plugin_name}] hook {hook_label} wait error: {e}"));
+                    self.output.send(&format!(
+                        "[plugin:{plugin_name}] hook {hook_label} wait error: {e}"
+                    ));
                     return;
                 }
             }
         }
+    }
+}
+
+fn hook_temp_dirs(cmd_str: &str) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for path in quoted_path_candidates(cmd_str) {
+        if path.starts_with(std::env::temp_dir())
+            && let Some(parent) = path.parent()
+        {
+            push_unique_path(&mut dirs, parent);
+        }
+    }
+    dirs
+}
+
+fn quoted_path_candidates(cmd_str: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut current = String::new();
+
+    for ch in cmd_str.chars() {
+        match quote {
+            Some(delim) if ch == delim => {
+                let candidate = current.trim();
+                if candidate.starts_with('/') {
+                    paths.push(PathBuf::from(candidate));
+                }
+                current.clear();
+                quote = None;
+            }
+            Some(_) => current.push(ch),
+            None if ch == '\'' || ch == '"' => {
+                quote = Some(ch);
+                current.clear();
+            }
+            None => {}
+        }
+    }
+
+    paths
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: &Path) {
+    if !paths.iter().any(|existing| existing == path) {
+        paths.push(path.to_path_buf());
     }
 }
 
@@ -233,7 +317,10 @@ pub fn list() -> Result<(), String> {
     if plugins.is_empty() {
         println!("No plugins installed.");
         println!();
-        println!("Place plugin manifests in: {}", xdg::plugins_dir().display());
+        println!(
+            "Place plugin manifests in: {}",
+            xdg::plugins_dir().display()
+        );
         println!();
         println!("Example plugin (example.toml):");
         println!("  name = \"my-plugin\"");

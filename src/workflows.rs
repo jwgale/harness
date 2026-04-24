@@ -79,7 +79,11 @@ pub fn plan_execution(wf: &WorkflowDef) -> Vec<StepGroup> {
             let mut evaluator_idx = None;
             for (j, candidate_step) in steps.iter().enumerate().skip(i) {
                 let candidate = agents::load(&candidate_step.agent).ok();
-                if candidate.as_ref().map(|a| a.role == "evaluator").unwrap_or(false) {
+                if candidate
+                    .as_ref()
+                    .map(|a| a.role == "evaluator")
+                    .unwrap_or(false)
+                {
                     evaluator_idx = Some(j);
                     break;
                 }
@@ -192,7 +196,8 @@ pub fn validate(wf: &WorkflowDef) -> Vec<String> {
             if !has_evaluator_after {
                 errors.push(format!(
                     "Step {} (agent '{}'): loop_until requires a subsequent evaluator step.",
-                    i + 1, step.agent
+                    i + 1,
+                    step.agent
                 ));
             }
         }
@@ -236,10 +241,9 @@ pub fn load(name: &str) -> Result<WorkflowDef, String> {
             xdg::workflows_dir().display()
         ));
     }
-    let content = fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read workflow '{name}': {e}"))?;
-    toml::from_str(&content)
-        .map_err(|e| format!("Failed to parse workflow '{name}': {e}"))
+    let content =
+        fs::read_to_string(&path).map_err(|e| format!("Failed to read workflow '{name}': {e}"))?;
+    toml::from_str(&content).map_err(|e| format!("Failed to parse workflow '{name}': {e}"))
 }
 
 fn workflow_path(name: &str) -> PathBuf {

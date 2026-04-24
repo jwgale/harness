@@ -54,11 +54,20 @@ pub fn load_config() -> VaultConfig {
     };
 
     VaultConfig {
-        enabled: vault.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false),
-        addr: vault.get("addr").and_then(|v| v.as_str())
-            .unwrap_or(DEFAULT_VAULT_ADDR).to_string(),
-        agent_name: vault.get("agent_name").and_then(|v| v.as_str())
-            .unwrap_or(DEFAULT_AGENT_NAME).to_string(),
+        enabled: vault
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        addr: vault
+            .get("addr")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_VAULT_ADDR)
+            .to_string(),
+        agent_name: vault
+            .get("agent_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_AGENT_NAME)
+            .to_string(),
     }
 }
 
@@ -66,8 +75,7 @@ pub fn load_config() -> VaultConfig {
 fn load_or_create_signing_key() -> Result<SigningKey, String> {
     let key_path = key_file_path();
     if key_path.exists() {
-        let bytes = fs::read(&key_path)
-            .map_err(|e| format!("Failed to read signing key: {e}"))?;
+        let bytes = fs::read(&key_path).map_err(|e| format!("Failed to read signing key: {e}"))?;
         if bytes.len() != 32 {
             return Err("Invalid signing key file (expected 32 bytes)".to_string());
         }
@@ -79,8 +87,7 @@ fn load_or_create_signing_key() -> Result<SigningKey, String> {
         let mut rng = rand::thread_rng();
         let key = SigningKey::generate(&mut rng);
         if let Some(parent) = key_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create key dir: {e}"))?;
+            fs::create_dir_all(parent).map_err(|e| format!("Failed to create key dir: {e}"))?;
         }
         fs::write(&key_path, key.to_bytes())
             .map_err(|e| format!("Failed to write signing key: {e}"))?;
@@ -118,18 +125,19 @@ pub fn is_healthy(config: &VaultConfig) -> bool {
     if !config.enabled {
         return false;
     }
-    block_on(async {
-        SanctumClient::connect(&config.addr).await.is_ok()
-    })
+    block_on(async { SanctumClient::connect(&config.addr).await.is_ok() })
 }
 
 /// Connect and authenticate to the vault. Returns a connected client.
 fn connect_and_auth(config: &VaultConfig) -> Result<SanctumClient, String> {
     let key = load_or_create_signing_key()?;
     block_on(async {
-        let client = SanctumClient::connect(&config.addr).await
+        let client = SanctumClient::connect(&config.addr)
+            .await
             .map_err(|e| format!("Vault connection failed: {e}"))?;
-        client.authenticate(&config.agent_name, &key).await
+        client
+            .authenticate(&config.agent_name, &key)
+            .await
             .map_err(|e| format!("Vault authentication failed: {e}"))?;
         Ok(client)
     })
@@ -139,7 +147,9 @@ fn connect_and_auth(config: &VaultConfig) -> Result<SanctumClient, String> {
 pub fn get_credential(config: &VaultConfig, path: &str) -> Result<Value, String> {
     let client = connect_and_auth(config)?;
     block_on(async {
-        let cred = client.retrieve(path, CREDENTIAL_TTL).await
+        let cred = client
+            .retrieve(path, CREDENTIAL_TTL)
+            .await
             .map_err(|e| format!("Failed to retrieve credential '{path}': {e}"))?;
         Ok(cred.value)
     })
@@ -164,7 +174,9 @@ pub fn use_credential(
 ) -> Result<Value, String> {
     let client = connect_and_auth(config)?;
     block_on(async {
-        let result = client.use_credential(path, operation, params).await
+        let result = client
+            .use_credential(path, operation, params)
+            .await
             .map_err(|e| format!("Vault use_credential failed: {e}"))?;
         if !result.success {
             return Err("Vault operation returned failure".to_string());
@@ -177,7 +189,9 @@ pub fn use_credential(
 pub fn list_credentials(config: &VaultConfig) -> Result<Vec<(String, Option<String>)>, String> {
     let client = connect_and_auth(config)?;
     block_on(async {
-        let creds = client.list().await
+        let creds = client
+            .list()
+            .await
             .map_err(|e| format!("Failed to list credentials: {e}"))?;
         Ok(creds.into_iter().map(|c| (c.path, c.description)).collect())
     })
@@ -199,7 +213,9 @@ pub fn store_credential(
             "description": description,
         });
         // Use the credential.store RPC if available
-        client.use_credential("_system", "store", params).await
+        client
+            .use_credential("_system", "store", params)
+            .await
             .map_err(|e| format!("Failed to store credential: {e}"))?;
         Ok(())
     })

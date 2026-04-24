@@ -1,6 +1,6 @@
 {
-  "backend": "claude",
-  "model": "claude-opus-4-6",
+  "backend": "codex",
+  "model": "default",
   "project_name": "harness",
   "max_eval_rounds": 3,
   "builder_timeout_seconds": 1800,

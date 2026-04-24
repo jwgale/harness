@@ -9,8 +9,8 @@ A Rust CLI tool that orchestrates planner → builder → evaluator loops using 
 
 ## Build Rules
 - Rust: `clap` + `std::process::Command` + `std::fs` + `serde_json` + `chrono`
-- NO async, NO traits, NO generics, NO tokio
-- Functions, not abstractions
+- Keep orchestration mostly synchronous; use small async bridges only where an SDK requires it
+- Prefer functions and concrete types over abstraction-heavy designs
 - `cargo clippy -- -D warnings` must pass clean
 - Prompt templates embedded via `include_str!`
 

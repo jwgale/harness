@@ -63,7 +63,11 @@ pub fn validate(name: &str) -> Result<(), String> {
                     let names: Vec<&str> = steps.iter().map(|s| s.agent.as_str()).collect();
                     println!("  {}. [parallel] agents: {}", i + 1, names.join(", "));
                 }
-                workflows::StepGroup::Loop { body, evaluator, max_rounds } => {
+                workflows::StepGroup::Loop {
+                    body,
+                    evaluator,
+                    max_rounds,
+                } => {
                     let body_names: Vec<&str> = body.iter().map(|s| s.agent.as_str()).collect();
                     println!(
                         "  {}. [loop max={max_rounds}] body: {} -> evaluator: '{}'",
@@ -80,6 +84,9 @@ pub fn validate(name: &str) -> Result<(), String> {
         for err in &errors {
             println!("  - {err}");
         }
-        Err(format!("Workflow validation failed with {} error(s)", errors.len()))
+        Err(format!(
+            "Workflow validation failed with {} error(s)",
+            errors.len()
+        ))
     }
 }

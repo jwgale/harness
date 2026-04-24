@@ -18,7 +18,10 @@ pub fn list() -> Result<(), String> {
 
     println!("Defined agents ({}):\n", agents.len());
     for agent in &agents {
-        let desc = agent.description.as_deref().unwrap_or(agents::role_description(&agent.role));
+        let desc = agent
+            .description
+            .as_deref()
+            .unwrap_or(agents::role_description(&agent.role));
         let model_info = agent.model.as_deref().unwrap_or("(project default)");
         println!("  {} [{}]", agent.name, agent.role);
         println!("    {desc}");
@@ -57,7 +60,10 @@ pub fn add(name: &str, role: &str, backend: &str, description: Option<&str>) -> 
 
     agents::add(name, role, backend, description)?;
     println!("Agent '{name}' created ({role}, {backend}).");
-    println!("Edit: {}", xdg::agents_dir().join(format!("{name}.toml")).display());
+    println!(
+        "Edit: {}",
+        xdg::agents_dir().join(format!("{name}.toml")).display()
+    );
 
     Ok(())
 }
