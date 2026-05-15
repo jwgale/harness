@@ -16,3 +16,4 @@ pub mod status;
 pub mod vault_cmd;
 pub mod workflow_cmd;
 pub mod workspace;
+pub mod grok_cmd;

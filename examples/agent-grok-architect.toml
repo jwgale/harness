@@ -1,0 +1,15 @@
+# Example Grok-native Architect Supervisor
+name = "grok-architect"
+role = "architect"
+backend = "grok"
+description = "Lead architect with supervisor authority. Can rewrite work and trigger replanning."
+
+supervisor = true
+authority = ["read", "rewrite", "replan", "spawn"]
+allow_plan_mode = true
+
+specializations = ["architecture", "system-design", "long-term-planning"]
+context_scopes = ["architecture-decisions", "design-patterns"]
+
+# Use the best model by default (future Grok behavior)
+# model = "best-available"

@@ -1,0 +1,8 @@
+# Grok-native Evaluator
+name = "grok-evaluator"
+role = "evaluator"
+backend = "grok"
+description = "Strict evaluator with access to full project context and previous traces."
+
+specializations = ["code-review", "quality-assessment"]
+context_scopes = ["past-evaluations", "quality-standards"]

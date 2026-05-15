@@ -31,6 +31,20 @@ pub struct WorkflowStep {
     pub loop_until: Option<String>,
     /// Max iterations for loop_until (default: 3)
     pub max_rounds: Option<u32>,
+
+    // === Grok-Native Future Extensions (Malleable) ===
+    /// If true, the agent for this step should be treated as a supervisor with elevated authority.
+    /// Overrides the agent's own `supervisor` setting for this specific step.
+    #[serde(default)]
+    pub supervisor: Option<bool>,
+
+    /// Explicitly grant additional authority for this step (only relevant if supervisor).
+    #[serde(default)]
+    pub authority: Vec<crate::agents::SupervisorAuthority>,
+
+    /// Force this step to allow Plan Mode (useful for high-ambiguity or drift-correction steps).
+    #[serde(default)]
+    pub allow_plan_mode: Option<bool>,
 }
 
 /// A workflow definition loaded from TOML.

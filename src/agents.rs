@@ -15,7 +15,7 @@ pub struct AgentDef {
     pub name: String,
     /// Role: planner, builder, evaluator, or custom
     pub role: String,
-    /// Backend: claude, codex, or mock
+    /// Backend: claude, codex, mock, or grok
     pub backend: String,
     /// Optional model override (defaults to project config model)
     pub model: Option<String>,
@@ -33,6 +33,38 @@ pub struct AgentDef {
     pub timeout_seconds: Option<u64>,
     /// Optional description
     pub description: Option<String>,
+
+    // === Grok-Native Future Extensions (Malleable) ===
+    /// Marks this agent as a Supervisor / Super Agent with elevated authority.
+    /// Supervisor agents can detect drift and have permission to rewrite/replan work.
+    #[serde(default)]
+    pub supervisor: bool,
+
+    /// Authority granted to this agent when acting as a supervisor.
+    /// Only meaningful if `supervisor = true`.
+    #[serde(default)]
+    pub authority: Vec<SupervisorAuthority>,
+
+    /// Whether this agent is allowed to enter Plan Mode for high-ambiguity or drift-correction tasks.
+    #[serde(default)]
+    pub allow_plan_mode: bool,
+}
+
+/// Authority levels for Supervisor ("Super") agents.
+/// This enum is designed to be extended over time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisorAuthority {
+    /// Can read artifacts and outputs from other agents in the current workflow.
+    Read,
+    /// Can directly rewrite or modify artifacts produced by other agents.
+    Rewrite,
+    /// Can trigger replanning (enter Plan Mode) for sections of the workflow.
+    Replan,
+    /// Can spawn additional specialist subagents during execution.
+    Spawn,
+    /// Can escalate issues or terminate underperforming subagents.
+    Escalate,
 }
 
 /// Discover all agent definitions from ~/.config/harness/agents/*.toml
@@ -59,6 +91,26 @@ pub fn discover() -> Vec<AgentDef> {
     }
     agents.sort_by(|a, b| a.name.cmp(&b.name));
     agents
+}
+
+/// Returns true if this agent definition is marked as a supervisor (either via the
+/// `supervisor` field or has non-empty authority).
+pub fn is_supervisor(agent: &AgentDef) -> bool {
+    agent.supervisor || !agent.authority.is_empty()
+}
+
+/// Returns the effective authorities for an agent (combining explicit authority + defaults).
+pub fn effective_authority(agent: &AgentDef) -> Vec<SupervisorAuthority> {
+    if agent.authority.is_empty() && agent.supervisor {
+        // Default supervisor authorities if none specified
+        vec![
+            SupervisorAuthority::Read,
+            SupervisorAuthority::Rewrite,
+            SupervisorAuthority::Replan,
+        ]
+    } else {
+        agent.authority.clone()
+    }
 }
 
 /// Load a specific agent by name.
@@ -164,6 +216,10 @@ pub fn add(
         default_for,
         timeout_seconds: None,
         description: description.map(|s| s.to_string()),
+        // New Grok-native fields (defaults for now)
+        supervisor: false,
+        authority: vec![],
+        allow_plan_mode: false,
     };
 
     let content =

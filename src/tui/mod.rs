@@ -486,6 +486,7 @@ fn save_run_metadata(round: u32, backend: &Backend) -> Result<u32, String> {
         Backend::Claude => "claude",
         Backend::Codex => "codex",
         Backend::Mock => "mock",
+        Backend::Grok => "grok",
     };
     let run_num = artifacts::next_run_number();
     let metadata = serde_json::json!({
@@ -657,6 +658,10 @@ fn run_multi_agent_with_events(
                 parallel,
                 loop_until: None,
                 max_rounds: None,
+                // New Grok-native fields
+                supervisor: None,
+                authority: vec![],
+                allow_plan_mode: None,
             })
             .collect();
 

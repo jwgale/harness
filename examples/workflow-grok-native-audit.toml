@@ -1,0 +1,60 @@
+# Grok-Native Multi-Agent Workflow Example
+#
+# This workflow is designed specifically for Grok Build's future capabilities:
+# - Every step runs as one or more subagents
+# - Supervisor / Super Agents with rewrite authority
+# - Use of plan_mode for high-ambiguity or drift correction
+# - Master TODO orchestration for long-running work
+#
+# Copy to ~/.config/harness/workflows/grok-native-audit.toml to use.
+
+name = "grok-native-audit"
+description = "Grok-native architecture + security + maintainability audit with supervisor oversight"
+
+# Default max rounds for any iterative loops
+max_rounds = 3
+
+[[steps]]
+agent = "grok-planner"
+backend = "grok"
+# This step can use plan_mode if the goal is ambiguous
+allow_plan_mode = true
+
+[[steps]]
+agent = "grok-architect"
+backend = "grok"
+supervisor = true
+authority = ["read", "rewrite", "replan", "spawn"]
+allow_plan_mode = true
+description = "Lead architect supervisor. Can rewrite sections and replan if drift is detected."
+
+[[steps]]
+agent = "@security"
+backend = "grok"
+requires = ["security"]
+
+[[steps]]
+agent = "@performance"
+backend = "grok"
+requires = ["performance"]
+parallel = true
+
+[[steps]]
+agent = "@maintainability"
+backend = "grok"
+requires = ["maintainability"]
+parallel = true
+
+[[steps]]
+agent = "grok-evaluator"
+backend = "grok"
+
+# Optional final supervisor review pass
+[[steps]]
+agent = "grok-architect"
+backend = "grok"
+supervisor = true
+authority = ["read", "rewrite", "replan"]
+# This final pass can rewrite the entire audit output if needed
+allow_plan_mode = true
+prompt = "Review the full audit output. Rewrite any sections that have drifted from the original goal or contain low-quality analysis. Use plan_mode if major structural changes are needed."

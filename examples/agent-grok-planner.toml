@@ -1,0 +1,9 @@
+# Grok-native Planner (can use plan_mode for ambiguous goals)
+name = "grok-planner"
+role = "planner"
+backend = "grok"
+description = "Strategic planner optimized for Grok. Can enter plan_mode on complex goals."
+
+allow_plan_mode = true
+specializations = ["product-planning", "requirements"]
+context_scopes = ["product-strategy", "prior-decisions"]
