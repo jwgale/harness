@@ -486,6 +486,7 @@ fn save_run_metadata(round: u32, backend: &Backend) -> Result<u32, String> {
         Backend::Claude => "claude",
         Backend::Codex => "codex",
         Backend::Mock => "mock",
+        Backend::Grok => "grok",
     };
     let run_num = artifacts::next_run_number();
     let metadata = serde_json::json!({

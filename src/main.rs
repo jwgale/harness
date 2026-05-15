@@ -1,6 +1,7 @@
 mod agents;
 mod artifacts;
 mod bridge;
+mod backend;
 mod cli_backend;
 mod commands;
 mod config;

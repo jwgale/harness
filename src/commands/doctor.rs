@@ -63,6 +63,7 @@ pub fn run(deep: bool) -> Result<(), String> {
     check_tool(&mut checks, "systemd", "systemctl", &["--version"], false);
     check_tool(&mut checks, "Claude CLI", "claude", &["--version"], false);
     check_codex(&mut checks);
+    check_grok(&mut checks);
     check_optional_cargo_tools(&mut checks);
 
     if deep {
@@ -204,6 +205,27 @@ fn check_codex(checks: &mut Vec<Check>) {
             }
         }
         Err(e) => checks.push(Check::fail("Codex exec capabilities", e, true)),
+    }
+}
+
+fn check_grok(checks: &mut Vec<Check>) {
+    // Detect if we're running inside a Grok Build TUI session
+    let in_grok_env = std::env::var("GROK_SESSION_ID").is_ok()
+        || std::env::current_exe()
+            .map(|p| p.to_string_lossy().to_lowercase().contains("grok"))
+            .unwrap_or(false)
+        || std::path::Path::new("/home/jason/.grok").exists(); // common location
+
+    if in_grok_env {
+        checks.push(Check::ok(
+            "Grok Build environment",
+            "detected (native mode available via --backend grok)",
+        ));
+    } else {
+        checks.push(Check::warn(
+            "Grok Build environment",
+            "not detected (run `harness` commands from inside a Grok TUI session for full native support)",
+        ));
     }
 }
 

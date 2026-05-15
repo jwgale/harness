@@ -14,6 +14,7 @@ pub enum Backend {
     Claude,
     Codex,
     Mock,
+    Grok, // Added in PR 1 (Grok-Native Harness)
 }
 
 impl Backend {
@@ -22,8 +23,9 @@ impl Backend {
             "claude" => Ok(Backend::Claude),
             "codex" => Ok(Backend::Codex),
             "mock" => Ok(Backend::Mock),
+            "grok" => Ok(Backend::Grok),
             _ => Err(format!(
-                "Unknown backend: {s}. Use 'claude', 'codex', or 'mock'."
+                "Unknown backend: {s}. Use 'claude', 'codex', 'mock', or 'grok'."
             )),
         }
     }
@@ -205,6 +207,7 @@ pub fn run_oneshot(
         Backend::Claude => run_claude_oneshot(model, prompt, timeout_secs),
         Backend::Codex => run_codex_oneshot(model, prompt, timeout_secs),
         Backend::Mock => Ok(mock_response("oneshot")),
+        Backend::Grok => Err(grok_not_yet_implemented("oneshot")),
     }
 }
 
@@ -219,7 +222,19 @@ pub fn run_builder(
         Backend::Claude => run_claude_builder(model, prompt, timeout_secs),
         Backend::Codex => run_codex_builder(model, prompt, timeout_secs),
         Backend::Mock => Ok(mock_response("builder")),
+        Backend::Grok => Err(grok_not_yet_implemented("builder")),
     }
+}
+
+fn grok_not_yet_implemented(phase: &str) -> String {
+    format!(
+        "Grok-native backend is not fully implemented yet (PR 1 foundation only).\n\n\
+         You are running with --backend grok.\n\n\
+         Recommended: Run `harness` commands directly from inside your Grok Build TUI session \
+         with `/always-approve on` (Ctrl+O). Full native support using subagents, plan_mode, \
+         todo tracking, and direct GitHub + SCL MCP is coming in the next PRs.\n\n\
+         See L0 architecture decision CID 42346e23c1ff9c69 in the Shared Context Layer (harness namespace)."
+    )
 }
 
 fn mock_response(phase: &str) -> String {
@@ -502,6 +517,7 @@ pub fn run_oneshot_streaming(
             )
         }
         Backend::Mock => spawn_mock_streaming("oneshot"),
+        Backend::Grok => Err(grok_not_yet_implemented("oneshot-streaming")),
     }
 }
 
@@ -530,6 +546,7 @@ pub fn run_builder_streaming(
             )
         }
         Backend::Mock => spawn_mock_streaming("builder"),
+        Backend::Grok => Err(grok_not_yet_implemented("builder-streaming")),
     }
 }
 
