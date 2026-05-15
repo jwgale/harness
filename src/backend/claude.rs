@@ -6,9 +6,9 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+use super::StreamingProcess;
 use crate::global_config::GlobalConfig;
 use crate::scl;
-use super::StreamingProcess;
 
 pub struct ClaudeBackend;
 
@@ -62,8 +62,7 @@ impl ClaudeBackend {
             return Err(format!("claude exited with error: {stderr}"));
         }
 
-        String::from_utf8(output.stdout)
-            .map_err(|e| format!("Invalid UTF-8 in claude output: {e}"))
+        String::from_utf8(output.stdout).map_err(|e| format!("Invalid UTF-8 in claude output: {e}"))
     }
 
     fn run_builder_impl(model: &str, prompt: &str, timeout_secs: u64) -> Result<String, String> {

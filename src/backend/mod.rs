@@ -29,20 +29,10 @@ pub trait AgentBackend: Send + Sync {
     fn description(&self) -> String;
 
     /// Run a one-shot prompt (used by planner and evaluator).
-    fn run_oneshot(
-        &self,
-        model: &str,
-        prompt: &str,
-        timeout_secs: u64,
-    ) -> Result<String, String>;
+    fn run_oneshot(&self, model: &str, prompt: &str, timeout_secs: u64) -> Result<String, String>;
 
     /// Run the builder phase (longer-running, full project context, file I/O expected).
-    fn run_builder(
-        &self,
-        model: &str,
-        prompt: &str,
-        timeout_secs: u64,
-    ) -> Result<String, String>;
+    fn run_builder(&self, model: &str, prompt: &str, timeout_secs: u64) -> Result<String, String>;
 
     /// Streaming variant of `run_oneshot` (for TUI live output).
     fn run_oneshot_streaming(
@@ -113,13 +103,13 @@ pub fn get_backend(name: &str) -> Result<Box<dyn AgentBackend>, String> {
 // Re-export concrete types so call sites can do `use crate::backend::{get_backend, StreamingProcess};`
 mod claude;
 mod codex;
-mod mock;
-mod grok; // stub for now
+mod grok;
+mod mock; // stub for now
 
 pub use claude::ClaudeBackend;
 pub use codex::CodexBackend;
-pub use mock::MockBackend;
 pub use grok::GrokBackend;
+pub use mock::MockBackend;
 
 // ============================================================================
 // Shared helpers (used by multiple backends)
@@ -208,11 +198,15 @@ pub(crate) fn spawn_streaming_no_stdin(
         rx,
         Box::new(child),
         Box::new(move || {
-            let mut c = child_for_kill.lock().map_err(|_| "Failed to lock child".to_string())?;
+            let mut c = child_for_kill
+                .lock()
+                .map_err(|_| "Failed to lock child".to_string())?;
             c.kill().map_err(|e| format!("Failed to kill process: {e}"))
         }),
         Box::new(move || {
-            let mut c = child_for_wait.lock().map_err(|_| "Failed to lock child".to_string())?;
+            let mut c = child_for_wait
+                .lock()
+                .map_err(|_| "Failed to lock child".to_string())?;
             let status = c.wait().map_err(|e| format!("Failed to wait: {e}"))?;
             if !status.success() {
                 return Err("Process failed".to_string());
@@ -225,7 +219,7 @@ pub(crate) fn spawn_streaming_no_stdin(
 // Temporary re-exports during migration so existing code continues to compile.
 // These will be removed once all call sites are updated to the new trait.
 pub mod legacy {
-    pub use super::get_backend;
-    pub use super::StreamingProcess;
     pub use super::AgentBackend;
+    pub use super::StreamingProcess;
+    pub use super::get_backend;
 }

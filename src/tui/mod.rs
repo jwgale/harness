@@ -658,6 +658,10 @@ fn run_multi_agent_with_events(
                 parallel,
                 loop_until: None,
                 max_rounds: None,
+                // New Grok-native fields
+                supervisor: None,
+                authority: vec![],
+                allow_plan_mode: None,
             })
             .collect();
 

@@ -1,12 +1,13 @@
 mod agents;
 mod artifacts;
-mod bridge;
 mod backend;
+mod bridge;
 mod cli_backend;
 mod commands;
 mod config;
 mod evaluator;
 mod global_config;
+mod grok;
 mod notifications;
 mod plugins;
 mod progress;
@@ -135,6 +136,11 @@ enum Commands {
         #[command(subcommand)]
         action: WorkflowAction2,
     },
+    /// Grok-native commands (experimental / future state)
+    Grok {
+        #[command(subcommand)]
+        action: GrokAction,
+    },
     /// SanctumAI credential vault
     Vault {
         #[command(subcommand)]
@@ -240,6 +246,52 @@ enum WorkflowAction2 {
     Validate {
         /// Workflow name
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum GrokAction {
+    /// Execute a workflow using Grok-native subagent execution (prototype)
+    ExecuteWorkflow {
+        /// Name of the workflow to execute
+        name: String,
+    },
+    /// List all pending Grok requests waiting to be fulfilled
+    Pending,
+    /// Get a ready-to-use fulfillment prompt for the next (or specific) pending request
+    Fulfill {
+        /// Optional specific request ID to fulfill
+        request_id: Option<String>,
+    },
+    /// Interact with the Master TODO of the current workflow run
+    Todo {
+        #[command(subcommand)]
+        action: TodoAction,
+    },
+    /// Ask the WorkflowOrchestrator what to do next based on the Master TODO
+    /// (very useful when running inside a Grok Build session)
+    Orchestrate,
+    /// Trigger a replanning session (generates a rich plan mode prompt + records the replan initiation)
+    Replan,
+}
+
+#[derive(Subcommand)]
+enum TodoAction {
+    /// Show the current Master TODO status
+    Status,
+    /// Show the next actionable task
+    Next,
+    /// Update the status of a task
+    Update {
+        task_id: String,
+        /// new status: pending, in_progress, done, blocked, failed
+        status: String,
+    },
+    /// Add a note to a task or the orchestrator
+    Note {
+        /// task ID, or "orchestrator"
+        target: String,
+        note: String,
     },
 }
 
@@ -431,6 +483,25 @@ fn main() {
         Commands::Workflow { action } => match action {
             WorkflowAction2::List => commands::workflow_cmd::list(),
             WorkflowAction2::Validate { name } => commands::workflow_cmd::validate(&name),
+        },
+        Commands::Grok { action } => match action {
+            GrokAction::ExecuteWorkflow { name } => commands::grok_cmd::execute_workflow(&name),
+            GrokAction::Pending => commands::grok_cmd::list_pending(),
+            GrokAction::Fulfill { request_id } => {
+                commands::grok_cmd::fulfill(request_id.as_deref())
+            }
+            GrokAction::Todo { action } => match action {
+                TodoAction::Status => commands::grok_cmd::todo_status(),
+                TodoAction::Next => commands::grok_cmd::todo_next(),
+                TodoAction::Update { task_id, status } => {
+                    commands::grok_cmd::todo_update(&task_id, &status)
+                }
+                TodoAction::Note { target, note } => {
+                    commands::grok_cmd::todo_note(&target, &note)
+                }
+            },
+            GrokAction::Orchestrate => commands::grok_cmd::orchestrate(),
+            GrokAction::Replan => commands::grok_cmd::replan(),
         },
         Commands::Bridge { action } => match action {
             BridgeAction::Telegram { action } => match action {

@@ -235,6 +235,10 @@ pub fn run_multi_agent(
                     parallel: true,
                     loop_until: None,
                     max_rounds: None,
+                    // New Grok-native fields
+                    supervisor: None,
+                    authority: vec![],
+                    allow_plan_mode: None,
                 })
                 .collect();
             let group = workflows::StepGroup::Parallel(steps);
@@ -257,6 +261,10 @@ pub fn run_multi_agent(
                 parallel: false,
                 loop_until: None,
                 max_rounds: None,
+                // New Grok-native fields
+                supervisor: None,
+                authority: vec![],
+                allow_plan_mode: None,
             })
             .collect();
         let groups: Vec<workflows::StepGroup> = steps

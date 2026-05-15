@@ -1,7 +1,7 @@
 //! Mock backend for testing (instant responses, no real CLI).
 
-use super::StreamingProcess;
 use super::AgentBackend;
+use super::StreamingProcess;
 
 pub struct MockBackend;
 
@@ -18,19 +18,33 @@ impl MockBackend {
 }
 
 impl AgentBackend for MockBackend {
-    fn name(&self) -> &'static str { "mock" }
+    fn name(&self) -> &'static str {
+        "mock"
+    }
 
-    fn is_available(&self) -> Result<bool, String> { Ok(true) }
+    fn is_available(&self) -> Result<bool, String> {
+        Ok(true)
+    }
 
     fn description(&self) -> String {
         "Mock backend (instant responses for testing)".to_string()
     }
 
-    fn run_oneshot(&self, _model: &str, _prompt: &str, _timeout_secs: u64) -> Result<String, String> {
+    fn run_oneshot(
+        &self,
+        _model: &str,
+        _prompt: &str,
+        _timeout_secs: u64,
+    ) -> Result<String, String> {
         Ok(Self::mock_response("oneshot"))
     }
 
-    fn run_builder(&self, _model: &str, _prompt: &str, _timeout_secs: u64) -> Result<String, String> {
+    fn run_builder(
+        &self,
+        _model: &str,
+        _prompt: &str,
+        _timeout_secs: u64,
+    ) -> Result<String, String> {
         Ok(Self::mock_response("builder"))
     }
 

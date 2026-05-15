@@ -219,12 +219,12 @@ fn check_grok(checks: &mut Vec<Check>) {
     if in_grok_env {
         checks.push(Check::ok(
             "Grok Build environment",
-            "detected (native mode available via --backend grok)",
+            "detected — Grok-native execution (--backend grok) is fully supported with subagents, plan_mode, and direct MCP tools",
         ));
     } else {
         checks.push(Check::warn(
             "Grok Build environment",
-            "not detected (run `harness` commands from inside a Grok TUI session for full native support)",
+            "not detected. For the best experience, run `harness` commands from inside a Grok Build TUI session (enables native subagent + GitHub MCP + rich SCL flows)",
         ));
     }
 }
